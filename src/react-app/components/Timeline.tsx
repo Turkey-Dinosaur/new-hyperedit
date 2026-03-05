@@ -7,12 +7,13 @@ interface TimelineProps {
   tracks: Track[];
   clips: TimelineClipType[];
   assets: Asset[];
-  selectedClipId: string | null;
+  selectedClipIds: string[];
   currentTime: number;
   duration: number;
   isPlaying: boolean;
   aspectRatio: '16:9' | '9:16';
-  onSelectClip: (id: string | null) => void;
+  onSelectClip: (id: string | null, modifiers?: { multi: boolean; range: boolean }) => void;
+  onSelectClips: (ids: string[], modifiers?: { multi: boolean }) => void;
   onTimeChange: (time: number) => void;
   onPlayPause: () => void;
   onStop: () => void;
@@ -24,7 +25,8 @@ interface TimelineProps {
   onToggleAspectRatio: () => void;
   autoSnap?: boolean;
   onToggleAutoSnap?: () => void;
-  onDropAsset: (asset: Asset, trackId: string, time: number) => void;
+  onDropAssets: (assets: Asset[], trackId: string, time: number) => void;
+  onFinalizeMove: (clipId: string) => void;
   onSave: () => void;
   getCaptionData?: (clipId: string) => CaptionData | null;
 }
@@ -45,12 +47,13 @@ export default function Timeline({
   tracks,
   clips,
   assets,
-  selectedClipId,
+  selectedClipIds,
   currentTime,
   duration,
   isPlaying,
   aspectRatio,
   onSelectClip,
+  onSelectClips,
   onTimeChange,
   onPlayPause,
   onStop,
@@ -62,13 +65,16 @@ export default function Timeline({
   onToggleAspectRatio,
   autoSnap = true,
   onToggleAutoSnap,
-  onDropAsset,
+  onDropAssets,
+  onFinalizeMove,
   onSave,
   getCaptionData,
 }: TimelineProps) {
   const [zoom, setZoom] = useState(1);
   const [isDraggingPlayhead, setIsDraggingPlayhead] = useState(false);
   const [dragOverTrack, setDragOverTrack] = useState<string | null>(null);
+  const [dragOverTime, setDragOverTime] = useState<number | null>(null);
+  const [selectionRect, setSelectionRect] = useState<{ x1: number, y1: number, x2: number, y2: number } | null>(null);
 
   const timelineRef = useRef<HTMLDivElement>(null);
   const tracksContainerRef = useRef<HTMLDivElement>(null);
@@ -91,20 +97,30 @@ export default function Timeline({
   // Keyboard shortcuts
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
-      // Delete selected clip with Delete or Backspace key
-      if ((e.key === 'Delete' || e.key === 'Backspace') && selectedClipId) {
+      // Delete selected clips with Delete or Backspace key
+      if ((e.key === 'Delete' || e.key === 'Backspace') && selectedClipIds.length > 0) {
         // Don't trigger if user is typing in an input
         if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) {
           return;
         }
         e.preventDefault();
-        onDeleteClip(selectedClipId);
+        selectedClipIds.forEach(id => onDeleteClip(id));
+      }
+
+      // Select all clips with Ctrl+A
+      if ((e.ctrlKey || e.metaKey) && e.key === 'a') {
+        // Don't trigger if user is typing in an input
+        if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) {
+          return;
+        }
+        e.preventDefault();
+        onSelectClips(clips.map(c => c.id));
       }
     };
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [selectedClipId, onDeleteClip]);
+  }, [selectedClipIds, onDeleteClip]);
 
   // Calculate display properties
   const totalDuration = Math.max(duration, 10);
@@ -170,31 +186,139 @@ export default function Timeline({
     onTimeChange(newTime);
   }, [isDraggingPlayhead, pixelsPerSecond, duration, onTimeChange]);
 
-  const handleMouseUp = useCallback(() => {
-    setIsDraggingPlayhead(false);
+  const handleContainerMouseMove = useCallback((e: React.MouseEvent) => {
+    if (isDraggingPlayhead) {
+      handleMouseMove(e);
+      return;
+    }
+
+    if (selectionRect && tracksContainerRef.current) {
+      const rect = tracksContainerRef.current.getBoundingClientRect();
+      const x = e.clientX - rect.left;
+      const y = e.clientY - rect.top;
+      setSelectionRect(prev => prev ? { ...prev, x2: x, y2: y } : null);
+    }
+  }, [isDraggingPlayhead, handleMouseMove, selectionRect]);
+
+  const handleContainerMouseDown = useCallback((e: React.MouseEvent) => {
+    // Only start selection box if clicking on the background (not a clip, not playhead)
+    if (e.button !== 0) return;
+    if (!tracksContainerRef.current) return;
+
+    const rect = tracksContainerRef.current.getBoundingClientRect();
+    const x = e.clientX - rect.left;
+    const y = e.clientY - rect.top;
+
+    setSelectionRect({ x1: x, y1: y, x2: x, y2: y });
   }, []);
+
+  const handleMouseUp = useCallback((e: React.MouseEvent) => {
+    setIsDraggingPlayhead(false);
+
+    if (selectionRect && tracksContainerRef.current) {
+      // Find all clips that intersect with the selection box
+      const scrollLeft = tracksContainerRef.current.scrollLeft;
+      const scrollTop = tracksContainerRef.current.scrollTop;
+
+      const selXMin = Math.min(selectionRect.x1, selectionRect.x2) + scrollLeft;
+      const selXMax = Math.max(selectionRect.x1, selectionRect.x2) + scrollLeft;
+      const selYMin = Math.min(selectionRect.y1, selectionRect.y2) + scrollTop;
+      const selYMax = Math.max(selectionRect.y1, selectionRect.y2) + scrollTop;
+
+      const selectedIds: string[] = [];
+      let currentY = 24; // Account for 24px height of sticky time ruler
+
+      sortedTracks.forEach(track => {
+        const trackHeight = TRACK_HEIGHTS[track.type];
+        const trackClips = clips.filter(c => c.trackId === track.id);
+
+        trackClips.forEach(clip => {
+          const clipLeft = clip.start * pixelsPerSecond;
+          const clipRight = (clip.start + clip.duration) * pixelsPerSecond;
+          const clipTop = currentY;
+          const clipBottom = currentY + trackHeight;
+
+          // Check for intersection
+          const xOverlap = Math.max(0, Math.min(selXMax, clipRight) - Math.max(selXMin, clipLeft));
+          const yOverlap = Math.max(0, Math.min(selYMax, clipBottom) - Math.max(selYMin, clipTop));
+
+          if (xOverlap > 0 && yOverlap > 0) {
+            selectedIds.push(clip.id);
+          }
+        });
+
+        currentY += trackHeight;
+      });
+
+      if (selectedIds.length > 0) {
+        onSelectClips(selectedIds, { multi: e.ctrlKey || e.metaKey });
+      } else if (!e.ctrlKey && !e.metaKey && !e.shiftKey) {
+        onSelectClip(null);
+      }
+    }
+
+    setSelectionRect(null);
+  }, [selectionRect, sortedTracks, clips, pixelsPerSecond, onSelectClips, onSelectClip]);
 
   // Handle drop from asset library
   const handleDragOver = useCallback((e: React.DragEvent, trackId: string) => {
     e.preventDefault();
     e.stopPropagation();
     setDragOverTrack(trackId);
-  }, []);
+
+    const rect = tracksContainerRef.current?.getBoundingClientRect();
+    if (!rect) return;
+
+    const scrollLeft = tracksContainerRef.current?.scrollLeft || 0;
+    const dropX = e.clientX - rect.left + scrollLeft;
+    let time = Math.max(0, dropX / pixelsPerSecond);
+
+    // Magnetic Snapping for Library Drop
+    const trackClips = clips.filter(c => c.trackId === trackId);
+    let bestSnapDiff = 0.5; // Snap threshold
+    let snappedTime = time;
+
+    trackClips.forEach(c => {
+      const cEnd = c.start + c.duration;
+      if (Math.abs(time - cEnd) < bestSnapDiff) {
+        snappedTime = cEnd;
+        bestSnapDiff = Math.abs(time - cEnd);
+      }
+      if (Math.abs(time - c.start) < bestSnapDiff) {
+        snappedTime = c.start;
+        bestSnapDiff = Math.abs(time - c.start);
+      }
+    });
+
+    setDragOverTime(Math.max(0, snappedTime));
+  }, [pixelsPerSecond, clips]);
 
   const handleDragLeave = useCallback(() => {
     setDragOverTrack(null);
+    setDragOverTime(null);
   }, []);
 
   const handleDrop = useCallback((e: React.DragEvent, trackId: string) => {
     e.preventDefault();
     e.stopPropagation();
     setDragOverTrack(null);
+    setDragOverTime(null);
 
-    const assetData = e.dataTransfer.getData('application/x-hyperedit-asset');
-    if (!assetData) return;
+    // Prefer the new multi-asset payload, fallback to the old single-asset one
+    const assetsData = e.dataTransfer.getData('application/x-hyperedit-assets');
+    const legacyAssetData = e.dataTransfer.getData('application/x-hyperedit-asset');
+
+    if (!assetsData && !legacyAssetData) return;
 
     try {
-      const asset = JSON.parse(assetData) as Asset;
+      let droppedAssets: Asset[] = [];
+      if (assetsData) {
+        droppedAssets = JSON.parse(assetsData) as Asset[];
+      } else if (legacyAssetData) {
+        droppedAssets = [JSON.parse(legacyAssetData) as Asset];
+      }
+
+      if (droppedAssets.length === 0) return;
 
       // Calculate drop time position
       const rect = tracksContainerRef.current?.getBoundingClientRect();
@@ -204,11 +328,11 @@ export default function Timeline({
       const dropX = e.clientX - rect.left + scrollLeft;
       const dropTime = Math.max(0, dropX / pixelsPerSecond);
 
-      onDropAsset(asset, trackId, dropTime);
+      onDropAssets(droppedAssets, trackId, dragOverTime ?? dropTime);
     } catch (err) {
-      console.error('Failed to parse dropped asset:', err);
+      console.error('Failed to parse dropped assets:', err);
     }
-  }, [pixelsPerSecond, onDropAsset]);
+  }, [pixelsPerSecond, onDropAssets]);
 
   // Get asset for a clip
   const getAssetForClip = useCallback((clip: TimelineClipType) =>
@@ -237,11 +361,10 @@ export default function Timeline({
             </button>
             <button
               onClick={onPlayPause}
-              className={`p-1.5 rounded transition-colors ${
-                isPlaying
-                  ? 'bg-orange-500 hover:bg-orange-600 text-white'
-                  : 'bg-zinc-700 hover:bg-zinc-600'
-              }`}
+              className={`p-1.5 rounded transition-colors ${isPlaying
+                ? 'bg-orange-500 hover:bg-orange-600 text-white'
+                : 'bg-zinc-700 hover:bg-zinc-600'
+                }`}
               title={isPlaying ? 'Pause' : 'Play'}
             >
               {isPlaying ? (
@@ -262,10 +385,10 @@ export default function Timeline({
               <Scissors className="w-3.5 h-3.5" />
             </button>
             <button
-              onClick={() => selectedClipId && onDeleteClip(selectedClipId)}
-              disabled={!selectedClipId}
+              onClick={() => selectedClipIds.forEach(id => onDeleteClip(id))}
+              disabled={selectedClipIds.length === 0}
               className="p-1.5 bg-zinc-700 hover:bg-red-600 disabled:opacity-40 disabled:hover:bg-zinc-700 rounded transition-colors"
-              title="Delete selected clip (Delete key)"
+              title="Delete selected clips (Delete key)"
             >
               <Trash2 className="w-3.5 h-3.5" />
             </button>
@@ -290,11 +413,10 @@ export default function Timeline({
             <div className="w-px h-4 bg-zinc-600" />
             <button
               onClick={onToggleAutoSnap}
-              className={`p-1.5 rounded transition-colors ${
-                autoSnap
-                  ? 'bg-orange-500/20 text-orange-400 hover:bg-orange-500/30'
-                  : 'bg-zinc-700 hover:bg-zinc-600 text-zinc-400'
-              }`}
+              className={`p-1.5 rounded transition-colors ${autoSnap
+                ? 'bg-orange-500/20 text-orange-400 hover:bg-orange-500/30'
+                : 'bg-zinc-700 hover:bg-zinc-600 text-zinc-400'
+                }`}
               title={autoSnap ? 'Auto-snap ON: Clips shift when deleting' : 'Auto-snap OFF: Gaps remain when deleting'}
             >
               {autoSnap ? (
@@ -383,9 +505,22 @@ export default function Timeline({
         {/* Scrollable tracks area */}
         <div
           ref={tracksContainerRef}
-          className="flex-1 overflow-auto"
-          onMouseMove={handleMouseMove}
+          className="flex-1 overflow-auto relative"
+          onMouseMove={handleContainerMouseMove}
+          onMouseDown={handleContainerMouseDown}
         >
+          {/* Marquee selection box */}
+          {selectionRect && (
+            <div
+              className="absolute border border-orange-500/50 bg-orange-500/20 z-50 pointer-events-none"
+              style={{
+                left: Math.min(selectionRect.x1, selectionRect.x2),
+                top: Math.min(selectionRect.y1, selectionRect.y2),
+                width: Math.abs(selectionRect.x2 - selectionRect.x1),
+                height: Math.abs(selectionRect.y2 - selectionRect.y1),
+              }}
+            />
+          )}
           <div
             className="relative"
             style={{ width: timelineWidth, minHeight: '100%' }}
@@ -420,9 +555,8 @@ export default function Timeline({
                 return (
                   <div
                     key={track.id}
-                    className={`relative border-b border-zinc-800/50 ${
-                      isDragOver ? 'bg-orange-500/10' : 'bg-zinc-900/30'
-                    }`}
+                    className={`relative border-b border-zinc-800/50 ${isDragOver ? 'bg-orange-500/10' : 'bg-zinc-900/30'
+                      }`}
                     style={{ height: TRACK_HEIGHTS[track.type] }}
                     onDragOver={(e) => handleDragOver(e, track.id)}
                     onDragLeave={handleDragLeave}
@@ -448,10 +582,22 @@ export default function Timeline({
                       </div>
                     )}
 
-                    {/* Drop indicator */}
+                    {/* Drop indicator background */}
                     {isDragOver && (
                       <div className="absolute inset-0 flex items-center justify-center text-xs text-orange-400 pointer-events-none border-2 border-dashed border-orange-500/50 rounded">
                         Drop to add clip
+                      </div>
+                    )}
+
+                    {/* Magnetic snap line indicator */}
+                    {isDragOver && dragOverTime !== null && (
+                      <div
+                        className="absolute top-0 bottom-0 w-1 bg-orange-400 z-50 pointer-events-none shadow-[0_0_8px_rgba(249,115,22,0.8)] transition-all duration-75"
+                        style={{ left: `${dragOverTime * pixelsPerSecond}px` }}
+                      >
+                        <div className="absolute -top-4 -translate-x-1/2 bg-orange-500 text-white text-[10px] px-1 rounded whitespace-nowrap">
+                          Insert here
+                        </div>
                       </div>
                     )}
 
@@ -470,15 +616,18 @@ export default function Timeline({
                           clip={clip}
                           asset={getAssetForClip(clip)}
                           pixelsPerSecond={pixelsPerSecond}
-                          isSelected={selectedClipId === clip.id}
+                          isSelected={selectedClipIds.includes(clip.id)}
                           trackHeight={TRACK_HEIGHTS[track.type]}
-                          onClick={() => onSelectClip(clip.id)}
+                          onClick={(modifiers) => onSelectClip(clip.id, modifiers)}
                           onMove={(newStart) => onMoveClip(clip.id, newStart)}
                           onResize={(inPoint, outPoint, newStart) =>
                             onResizeClip(clip.id, inPoint, outPoint, newStart)
                           }
                           onDelete={() => onDeleteClip(clip.id)}
-                          onDragEnd={onSave}
+                          onDragEnd={() => {
+                            onFinalizeMove(clip.id);
+                            onSave();
+                          }}
                           isCaption={isCaption}
                           captionPreview={captionPreview}
                         />

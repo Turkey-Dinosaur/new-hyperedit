@@ -23,8 +23,9 @@ interface ChapterData {
 }
 
 export default function Home() {
-  const [selectedClipId, setSelectedClipId] = useState<string | null>(null);
-  const [selectedAssetId, setSelectedAssetId] = useState<string | null>(null);
+  const [selectedClipIds, setSelectedClipIds] = useState<string[]>([]);
+  const [lastSelectedClipId, setLastSelectedClipId] = useState<string | null>(null);
+  const [selectedAssetIds, setSelectedAssetIds] = useState<string[]>([]);
   const [currentTime, setCurrentTime] = useState(0);
   const [isPlaying, setIsPlaying] = useState(false);
   const [chapterData, setChapterData] = useState<ChapterData | null>(null);
@@ -57,6 +58,7 @@ export default function Home() {
     updateClip,
     deleteClip,
     moveClip,
+    finalizeClipMove,
     splitClip,
     saveProject,
     loadProject,
@@ -76,6 +78,7 @@ export default function Home() {
     updateTabAsset,
     // Settings
     setSettings,
+    setClips,
   } = useProject();
 
   // Compute the active clips based on which tab is selected
@@ -313,60 +316,149 @@ export default function Home() {
     setShowGifSearch(false);
   }, [refreshAssets]);
 
+  // Handle batch asset deletion
+  const handleBatchDeleteAsset = useCallback(async () => {
+    if (selectedAssetIds.length === 0) return;
+
+    // Check if any selected asset is used in timeline
+    const usedAssets = selectedAssetIds.filter(id => clips.some(c => c.assetId === id));
+
+    let confirmMsg = `Are you sure you want to delete ${selectedAssetIds.length} assets?`;
+    if (usedAssets.length > 0) {
+      confirmMsg += `\n\nWARNING: ${usedAssets.length} of these assets are used in your timeline. Deleting them will remove their clips from the project!`;
+    }
+
+    const confirmDelete = window.confirm(confirmMsg);
+    if (!confirmDelete) return;
+
+    try {
+      // Delete one by one for now as backend only supports singular DELETE
+      for (const assetId of selectedAssetIds) {
+        await deleteAsset(assetId);
+      }
+      setSelectedAssetIds([]);
+      setPreviewAssetId(null);
+    } catch (error) {
+      console.error('Batch delete failed:', error);
+      alert('Some assets could not be deleted');
+    }
+  }, [selectedAssetIds, deleteAsset, clips]);
+
   // Handle drag start from asset library
   const handleAssetDragStart = useCallback((_asset: Asset) => {
     // Asset drag is handled by the browser's native drag-drop
   }, []);
 
   // Handle asset selection (from library)
-  const handleAssetSelect = useCallback((assetId: string | null) => {
-    setSelectedAssetId(assetId);
-    // When selecting from library, preview that asset
+  const handleAssetSelect = useCallback((assetId: string | null, modifiers: { multi: boolean; range: boolean }) => {
+    if (!assetId) {
+      setSelectedAssetIds([]);
+      setPreviewAssetId(null);
+      return;
+    }
+
+    setSelectedAssetIds(prev => {
+      let next: string[];
+
+      if (modifiers.range && prev.length > 0) {
+        // Range selection (Shift + Click)
+        const lastId = prev[prev.length - 1];
+        const lastIndex = assets.findIndex(a => a.id === lastId);
+        const currentIndex = assets.findIndex(a => a.id === assetId);
+
+        if (lastIndex !== -1 && currentIndex !== -1) {
+          const start = Math.min(lastIndex, currentIndex);
+          const end = Math.max(lastIndex, currentIndex);
+          const rangeIds = assets.slice(start, end + 1).map(a => a.id);
+          // Combine with previous selection, ensuring uniqueness
+          next = Array.from(new Set([...prev, ...rangeIds]));
+        } else {
+          next = [assetId];
+        }
+      } else if (modifiers.multi) {
+        // Toggle selection (Ctrl/Cmd + Click)
+        if (prev.includes(assetId)) {
+          next = prev.filter(id => id !== assetId);
+        } else {
+          next = [...prev, assetId];
+        }
+      } else {
+        // Single selection
+        next = [assetId];
+      }
+
+      return next;
+    });
+
+    // Preview the last selected asset
     setPreviewAssetId(assetId);
     // Clear timeline clip selection
-    setSelectedClipId(null);
-  }, []);
+    setSelectedClipIds([]);
+    setLastSelectedClipId(null);
+  }, [assets]);
 
-  // Handle dropping asset onto timeline
-  const handleDropAsset = useCallback((asset: Asset, trackId: string, time: number) => {
-    // Determine which track to use based on asset type
-    let targetTrackId = trackId;
+  // Handle dropping multiple assets onto timeline
+  const handleDropAssets = useCallback((droppedAssets: Asset[], trackId: string, time: number) => {
+    let currentTimeOffset = time;
 
-    // If dropping audio on video track, redirect to audio track
-    if (asset.type === 'audio' && trackId.startsWith('V')) {
-      targetTrackId = 'A1';
-    }
-    // If dropping video/image on audio track, redirect to video track
-    if (asset.type !== 'audio' && trackId.startsWith('A')) {
-      targetTrackId = 'V1';
-    }
+    droppedAssets.forEach(asset => {
+      // Determine which track to use based on asset type
+      let targetTrackId = trackId;
 
-    // Images need a default duration (5 seconds) since they don't have inherent duration
-    const clipDuration = asset.type === 'image' ? 5 : asset.duration;
-
-    // Check if we're on an edit tab (not main)
-    if (activeTabId !== 'main') {
-      // Add clip to the edit tab's clips array
-      const activeTab = timelineTabs.find(tab => tab.id === activeTabId);
-      if (activeTab) {
-        const newClip: TimelineClip = {
-          id: crypto.randomUUID(),
-          assetId: asset.id,
-          trackId: targetTrackId,
-          start: time,
-          duration: clipDuration || 5,
-          inPoint: 0,
-          outPoint: clipDuration || 5,
-        };
-        updateTabClips(activeTabId, [...activeTab.clips, newClip]);
-        console.log('Added clip to edit tab:', activeTabId, newClip);
+      // If dropping audio on video track, redirect to audio track
+      if (asset.type === 'audio' && trackId.startsWith('V')) {
+        targetTrackId = 'A1';
       }
-    } else {
-      // Add clip to main timeline
-      addClip(asset.id, targetTrackId, time, clipDuration);
-    }
+      // If dropping video/image on audio track, redirect to video track
+      if (asset.type !== 'audio' && trackId.startsWith('A')) {
+        targetTrackId = 'V1';
+      }
+
+      // Images need a default duration (5 seconds) since they don't have inherent duration
+      const clipDuration = asset.type === 'image' ? 5 : asset.duration;
+
+      // Check if we're on an edit tab (not main)
+      if (activeTabId !== 'main') {
+        // Add clip to the edit tab's clips array
+        const activeTab = timelineTabs.find(tab => tab.id === activeTabId);
+        if (activeTab) {
+          const newClip: TimelineClip = {
+            id: crypto.randomUUID(),
+            assetId: asset.id,
+            trackId: targetTrackId,
+            start: currentTimeOffset,
+            duration: clipDuration || 5,
+            inPoint: 0,
+            outPoint: clipDuration || 5,
+          };
+          updateTabClips(activeTabId, [...activeTab.clips, newClip]); // Note: may need optimization for batch React state updates
+          console.log('Added clip to edit tab:', activeTabId, newClip);
+        }
+      } else {
+        // Add clip to main timeline
+        addClip(asset.id, targetTrackId, currentTimeOffset, clipDuration);
+      }
+
+      // Advance the time offset for the next asset in the drop sequence
+      currentTimeOffset += (clipDuration || 5);
+    });
+
     saveProject();
+
+    // After state flushes (next render), we could finalize collisions, but addClip appends to end of state blindly.
+    // finalizeClipMove works on existing clips. We should call it for the first dropped clip ideally.
+    // But since handleDropAssets is simple, we rely on the magnetic snapping that happened during drag in Timeline.tsx.
   }, [addClip, saveProject, activeTabId, timelineTabs, updateTabClips]);
+
+  // Handle finalize move
+  const handleFinalizeMove = useCallback((clipId: string) => {
+    if (activeTabId !== 'main') {
+      // Collision resolution (ripple/bump) only implemented for main timeline for now
+      return;
+    }
+    finalizeClipMove(clipId);
+    saveProject();
+  }, [activeTabId, finalizeClipMove, saveProject]);
 
   // Handle moving clip
   const handleMoveClip = useCallback((clipId: string, newStart: number, newTrackId?: string) => {
@@ -442,10 +534,10 @@ export default function Home() {
       deleteClip(clipId, autoSnap);
     }
 
-    if (selectedClipId === clipId) {
-      setSelectedClipId(null);
+    if (selectedClipIds.includes(clipId)) {
+      setSelectedClipIds(prev => prev.filter(id => id !== clipId));
     }
-  }, [deleteClip, selectedClipId, autoSnap, activeTabId, timelineTabs, updateTabClips]);
+  }, [deleteClip, selectedClipIds, autoSnap, activeTabId, timelineTabs, updateTabClips]);
 
   // Handle cutting clips at the playhead position
   const handleCutAtPlayhead = useCallback(() => {
@@ -488,10 +580,58 @@ export default function Home() {
   }, [setSettings]);
 
   // Handle selecting clip
-  const handleSelectClip = useCallback((clipId: string | null) => {
-    setSelectedClipId(clipId);
+  const handleSelectClip = useCallback((clipId: string | null, modifiers?: { multi: boolean; range: boolean }) => {
+    if (!clipId) {
+      setSelectedClipIds([]);
+      setLastSelectedClipId(null);
+      return;
+    }
+
+    // Handle modifiers
+    setSelectedClipIds(prev => {
+      if (modifiers?.range && lastSelectedClipId) {
+        // Range selection across tracks based on start time
+        const sortedClips = [...activeClips].sort((a, b) => a.start - b.start);
+        const startIndex = sortedClips.findIndex(c => c.id === lastSelectedClipId);
+        const endIndex = sortedClips.findIndex(c => c.id === clipId);
+
+        if (startIndex !== -1 && endIndex !== -1) {
+          const start = Math.min(startIndex, endIndex);
+          const end = Math.max(startIndex, endIndex);
+          const rangeIds = sortedClips.slice(start, end + 1).map(c => c.id);
+          return Array.from(new Set([...prev, ...rangeIds]));
+        }
+        return [clipId];
+      } else if (modifiers?.multi) {
+        // Toggle selection
+        if (prev.includes(clipId)) {
+          return prev.filter(id => id !== clipId);
+        } else {
+          return [...prev, clipId];
+        }
+      } else {
+        // Single selection
+        return [clipId];
+      }
+    });
+
+    setLastSelectedClipId(clipId);
     // Clear asset preview mode - let timeline-based preview take over
     setPreviewAssetId(null);
+  }, [activeClips, lastSelectedClipId]);
+
+  // Handle plural selection (e.g. from marquee)
+  const handleSelectClips = useCallback((ids: string[], modifiers?: { multi: boolean }) => {
+    setSelectedClipIds(prev => {
+      if (modifiers?.multi) {
+        return Array.from(new Set([...prev, ...ids]));
+      }
+      return ids;
+    });
+    if (ids.length > 0) {
+      setLastSelectedClipId(ids[ids.length - 1]);
+      setPreviewAssetId(null);
+    }
   }, []);
 
   // Handle updating clip transform (scale, rotation, crop, etc.)
@@ -500,10 +640,15 @@ export default function Home() {
     saveProject();
   }, [updateClip, saveProject]);
 
-  // Get selected clip and its asset
+  // Get selected clips and their assets
+  const selectedClips = useMemo(() =>
+    activeClips.filter(c => selectedClipIds.includes(c.id)),
+    [activeClips, selectedClipIds]
+  );
+
   const selectedClip = useMemo(() =>
-    clips.find(c => c.id === selectedClipId) || null,
-    [clips, selectedClipId]
+    selectedClips.length > 0 ? selectedClips[selectedClips.length - 1] : null,
+    [selectedClips]
   );
 
   const selectedClipAsset = useMemo(() =>
@@ -530,7 +675,8 @@ export default function Home() {
 
   // Handle selecting layer from video preview
   const handleLayerSelect = useCallback((layerId: string) => {
-    setSelectedClipId(layerId);
+    setSelectedClipIds([layerId]);
+    setLastSelectedClipId(layerId);
     setPreviewAssetId(null);
   }, []);
 
@@ -543,13 +689,10 @@ export default function Home() {
     // Find the video asset to edit - prioritize selected clip's asset, otherwise first video
     let targetAssetId: string | null = null;
 
-    if (selectedClipId) {
-      const selectedClip = clips.find(c => c.id === selectedClipId);
-      if (selectedClip) {
-        const asset = assets.find(a => a.id === selectedClip.assetId);
-        if (asset?.type === 'video') {
-          targetAssetId = asset.id;
-        }
+    if (selectedClip) {
+      const asset = assets.find(a => a.id === selectedClip.assetId);
+      if (asset?.type === 'video') {
+        targetAssetId = asset.id;
       }
     }
 
@@ -594,7 +737,7 @@ export default function Home() {
       }
       await saveProject();
     }
-  }, [session, assets, clips, selectedClipId, refreshAssets, updateClip, saveProject]);
+  }, [session, assets, clips, selectedClip, refreshAssets, updateClip, saveProject]);
 
   // Handle chapter generation
   const handleGenerateChapters = useCallback(async () => {
@@ -1440,6 +1583,104 @@ export default function Home() {
     };
   }, [session, clips, assets, refreshAssets, updateClip, addClip, saveProject]);
 
+  // Handle auto-ordering clips based on filename timestamps
+  const handleAutoOrder = useCallback(async () => {
+    // Work on the currently visible clips (main tab or edit tab)
+    const currentClips = activeTabId === 'main' ? clips : (timelineTabs.find(t => t.id === activeTabId)?.clips || []);
+    if (currentClips.length === 0) return;
+
+    // Group clips by trackId so we reorder within each track independently
+    const clipsByTrack = new Map<string, typeof currentClips>();
+    currentClips.forEach(clip => {
+      const existing = clipsByTrack.get(clip.trackId) || [];
+      existing.push(clip);
+      clipsByTrack.set(clip.trackId, existing);
+    });
+
+    // Parse a datetime from a filename using multiple common patterns
+    const parseDateTimeFromFilename = (filename: string): number => {
+      // Remove extension for cleaner matching
+      const base = filename.replace(/\.[^.]+$/, '');
+
+      // Pattern 1: YYYY-MM-DD_HH-mm-ss or YYYY-MM-DD HH-mm-ss (common screencast/obs format)
+      const p1 = base.match(/(\d{4})[-_](\d{2})[-_](\d{2})[\s_T-](\d{2})[-_.](\d{2})[-_.](\d{2})/);
+      if (p1) {
+        return new Date(+p1[1], +p1[2] - 1, +p1[3], +p1[4], +p1[5], +p1[6]).getTime();
+      }
+
+      // Pattern 2: YYYYMMDD_HHmmss or YYYYMMDDHHMMSS (compact, common camera format)
+      const p2 = base.match(/(\d{4})(\d{2})(\d{2})[-_ ]?(\d{2})(\d{2})(\d{2})/);
+      if (p2) {
+        return new Date(+p2[1], +p2[2] - 1, +p2[3], +p2[4], +p2[5], +p2[6]).getTime();
+      }
+
+      // Pattern 3: IMG_YYYYMMDD or VID_YYYYMMDD (phone camera naming)
+      const p3 = base.match(/(?:IMG|VID|DSC|MOV|MVI|DSCN|P|GOPR?)[-_ ]?(\d{4})(\d{2})(\d{2})/i);
+      if (p3) {
+        return new Date(+p3[1], +p3[2] - 1, +p3[3]).getTime();
+      }
+
+      // Pattern 4: YYYY-MM-DD only (date without time)
+      const p4 = base.match(/(\d{4})[-_](\d{2})[-_](\d{2})/);
+      if (p4) {
+        return new Date(+p4[1], +p4[2] - 1, +p4[3]).getTime();
+      }
+
+      // Pattern 5: Unix timestamp in filename (13 digits = ms, 10 digits = seconds)
+      const p5 = base.match(/(\d{13})/);
+      if (p5) {
+        return parseInt(p5[1]);
+      }
+      const p5b = base.match(/(\d{10})/);
+      if (p5b) {
+        return parseInt(p5b[1]) * 1000;
+      }
+
+      return 0; // No recognizable date
+    };
+
+    const reorderedAllClips: TimelineClip[] = [];
+
+    clipsByTrack.forEach((trackClips, _trackId) => {
+      // Map clips to their parsed timestamps
+      const clipsWithTime = trackClips.map(clip => {
+        const asset = assets.find(a => a.id === clip.assetId);
+        const filename = asset?.filename || '';
+        const timestamp = parseDateTimeFromFilename(filename);
+        return { clip, timestamp, filename };
+      });
+
+      // Sort: by timestamp first, then alphabetically by filename as fallback
+      clipsWithTime.sort((a, b) => {
+        if (a.timestamp !== 0 && b.timestamp !== 0) return a.timestamp - b.timestamp;
+        if (a.timestamp !== 0) return -1;
+        if (b.timestamp !== 0) return 1;
+        return a.filename.localeCompare(b.filename);
+      });
+
+      // Reassign start times sequentially (back-to-back on the track)
+      let currentStart = 0;
+      clipsWithTime.forEach(({ clip }) => {
+        reorderedAllClips.push({ ...clip, start: currentStart });
+        currentStart += clip.duration;
+      });
+
+      console.log(`[AutoOrder] Track ${_trackId}: reordered ${clipsWithTime.length} clips`,
+        clipsWithTime.map(c => `${c.filename} (ts=${c.timestamp})`));
+    });
+
+    // Apply the reordered clips
+    if (activeTabId === 'main') {
+      setClips(reorderedAllClips);
+    } else {
+      updateTabClips(activeTabId, reorderedAllClips);
+    }
+
+    // Small delay to let React state sync before saving
+    await new Promise(resolve => setTimeout(resolve, 100));
+    await saveProject();
+  }, [clips, assets, setClips, saveProject, activeTabId, timelineTabs, updateTabClips]);
+
   // Handle contextual animation creation (uses video content to inform the animation)
   const handleCreateContextualAnimation = useCallback(async (request: {
     type: 'intro' | 'outro' | 'transition' | 'highlight';
@@ -1779,34 +2020,35 @@ export default function Home() {
         >
           <div className="flex flex-col h-full">
             {/* Asset Library */}
-            <div className={`${selectedClipId ? 'h-1/2' : 'h-full'} overflow-hidden`}>
+            <div className={`${selectedClipIds.length > 0 ? 'h-1/2' : 'h-full'} overflow-hidden`}>
               <AssetLibrary
                 assets={assets}
                 onUpload={handleAssetUpload}
                 onDelete={deleteAsset}
+                onDeleteSelected={handleBatchDeleteAsset}
                 onDragStart={handleAssetDragStart}
                 onSelect={handleAssetSelect}
-                selectedAssetId={selectedAssetId}
+                selectedAssetIds={selectedAssetIds}
                 uploading={loading}
                 onOpenGifSearch={() => setShowGifSearch(true)}
               />
             </div>
 
-            {/* Clip/Caption Properties Panel (shown when clip is selected) */}
-            {selectedClipId && (
+            {/* Clip/Caption Properties Panel (shown when clips are selected) */}
+            {selectedClipIds.length > 0 && (
               <div className="h-1/2 border-t border-zinc-800/50 bg-zinc-900/50 overflow-hidden">
                 {selectedCaptionData ? (
                   <CaptionPropertiesPanel
                     captionData={selectedCaptionData}
-                    onUpdateStyle={(styleUpdates) => handleUpdateCaptionStyle(selectedClipId, styleUpdates)}
-                    onClose={() => setSelectedClipId(null)}
+                    onUpdateStyle={(styleUpdates) => selectedClip && handleUpdateCaptionStyle(selectedClip.id, styleUpdates)}
+                    onClose={() => setSelectedClipIds([])}
                   />
                 ) : (
                   <ClipPropertiesPanel
                     clip={selectedClip}
                     asset={selectedClipAsset}
-                    onUpdateTransform={handleUpdateClipTransform}
-                    onClose={() => setSelectedClipId(null)}
+                    onUpdateTransform={(clipId, transform) => handleUpdateClipTransform(clipId, transform)}
+                    onClose={() => setSelectedClipIds([])}
                   />
                 )}
               </div>
@@ -1826,7 +2068,7 @@ export default function Home() {
                 aspectRatio={aspectRatio}
                 onLayerMove={handleLayerMove}
                 onLayerSelect={handleLayerSelect}
-                selectedLayerId={selectedClipId}
+                selectedLayerId={selectedClip?.id || null}
               />
             ) : clips.length > 0 ? (
               // Assets exist but playhead is not over any clip
@@ -1857,12 +2099,13 @@ export default function Home() {
               tracks={tracks}
               clips={activeClips}
               assets={assets}
-              selectedClipId={selectedClipId}
+              selectedClipIds={selectedClipIds}
               currentTime={currentTime}
               duration={duration}
               isPlaying={isPlaying}
               aspectRatio={aspectRatio}
               onSelectClip={handleSelectClip}
+              onSelectClips={handleSelectClips}
               onTimeChange={handleTimelineSeek}
               onPlayPause={handlePlayPause}
               onStop={handleStop}
@@ -1874,7 +2117,8 @@ export default function Home() {
               onToggleAspectRatio={handleToggleAspectRatio}
               autoSnap={autoSnap}
               onToggleAutoSnap={() => setAutoSnap(prev => !prev)}
-              onDropAsset={handleDropAsset}
+              onDropAssets={handleDropAssets}
+              onFinalizeMove={handleFinalizeMove}
               onSave={saveProject}
               getCaptionData={getCaptionData}
             />
@@ -1893,33 +2137,30 @@ export default function Home() {
             <div className="flex items-center gap-1 px-2 border-b border-zinc-800/50">
               <button
                 onClick={() => setActiveAgent('director')}
-                className={`flex items-center gap-1.5 px-3 py-2 text-sm font-medium transition-colors ${
-                  activeAgent === 'director'
-                    ? 'text-orange-500 border-b-2 border-orange-500 bg-zinc-800/30'
-                    : 'text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/20'
-                }`}
+                className={`flex items-center gap-1.5 px-3 py-2 text-sm font-medium transition-colors ${activeAgent === 'director'
+                  ? 'text-orange-500 border-b-2 border-orange-500 bg-zinc-800/30'
+                  : 'text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/20'
+                  }`}
               >
                 <Sparkles className="w-3.5 h-3.5" />
                 Director
               </button>
               <button
                 onClick={() => setActiveAgent('picasso')}
-                className={`flex items-center gap-1.5 px-3 py-2 text-sm font-medium transition-colors ${
-                  activeAgent === 'picasso'
-                    ? 'text-orange-300 border-b-2 border-orange-300 bg-zinc-800/30'
-                    : 'text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/20'
-                }`}
+                className={`flex items-center gap-1.5 px-3 py-2 text-sm font-medium transition-colors ${activeAgent === 'picasso'
+                  ? 'text-orange-300 border-b-2 border-orange-300 bg-zinc-800/30'
+                  : 'text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/20'
+                  }`}
               >
                 <Palette className="w-3.5 h-3.5" />
                 Picasso
               </button>
               <button
                 onClick={() => setActiveAgent('dicaprio')}
-                className={`flex items-center gap-1.5 px-3 py-2 text-sm font-medium transition-colors ${
-                  activeAgent === 'dicaprio'
-                    ? 'text-zinc-300 border-b-2 border-zinc-300 bg-zinc-800/30'
-                    : 'text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/20'
-                }`}
+                className={`flex items-center gap-1.5 px-3 py-2 text-sm font-medium transition-colors ${activeAgent === 'dicaprio'
+                  ? 'text-zinc-300 border-b-2 border-zinc-300 bg-zinc-800/30'
+                  : 'text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/20'
+                  }`}
               >
                 <Film className="w-3.5 h-3.5" />
                 DiCaprio
@@ -1944,6 +2185,7 @@ export default function Home() {
                   onGenerateTranscriptAnimation={handleGenerateTranscriptAnimation}
                   onGenerateBatchAnimations={handleGenerateBatchAnimations}
                   onExtractAudio={handleExtractAudio}
+                  onAutoOrder={handleAutoOrder}
                   onCreateContextualAnimation={handleCreateContextualAnimation}
                   onOpenAnimationInTab={handleOpenAnimationInTab}
                   onEditAnimation={handleEditAnimation}
@@ -1955,7 +2197,7 @@ export default function Home() {
                   tracks={tracks}
                   assets={assets}
                   currentTime={currentTime}
-                  selectedClipId={selectedClipId}
+                  selectedClipId={selectedClip?.id || null}
                   activeTabId={activeTabId}
                   editTabAssetId={activeTabId !== 'main' ? timelineTabs.find(t => t.id === activeTabId)?.assetId : undefined}
                   editTabClips={activeTabId !== 'main' ? timelineTabs.find(t => t.id === activeTabId)?.clips : undefined}

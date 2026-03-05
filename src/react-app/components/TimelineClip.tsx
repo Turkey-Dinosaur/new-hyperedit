@@ -8,7 +8,7 @@ interface TimelineClipProps {
   pixelsPerSecond: number;
   isSelected: boolean;
   trackHeight: number;
-  onClick: () => void;
+  onClick: (modifiers: { multi: boolean; range: boolean }) => void;
   onMove: (newStart: number) => void;
   onResize: (newInPoint: number, newOutPoint: number, newStart?: number) => void;
   onDragEnd: () => void;
@@ -165,18 +165,17 @@ export default function TimelineClip({
       ref={clipRef}
       onClick={(e) => {
         e.stopPropagation();
-        onClick();
+        onClick({ multi: e.ctrlKey || e.metaKey, range: e.shiftKey });
       }}
       onMouseDown={handleMouseDown}
-      className={`absolute rounded-md bg-gradient-to-r ${colorClass} ${
-        isDragging
+      className={`absolute rounded-md bg-gradient-to-r ${colorClass} ${isDragging
           ? 'opacity-80 scale-105 shadow-xl shadow-black/50 z-30 cursor-grabbing ring-2 ring-orange-400'
           : isResizingLeft || isResizingRight
             ? 'cursor-ew-resize z-20 ring-2 ring-orange-400'
             : isSelected
               ? 'ring-2 ring-orange-400 shadow-lg shadow-orange-500/30 z-20 cursor-grab'
               : 'ring-1 ring-orange-500/50 hover:ring-orange-400 z-10 cursor-grab'
-      } transition-all duration-75`}
+        } transition-all duration-75`}
       style={{
         left: `${left}px`,
         width: `${width}px`,

@@ -6,9 +6,10 @@ interface AssetLibraryProps {
   assets: Asset[];
   onUpload: (files: FileList) => void;
   onDelete: (assetId: string) => void;
+  onDeleteSelected?: () => void;
   onDragStart: (asset: Asset) => void;
-  onSelect?: (assetId: string | null) => void;
-  selectedAssetId?: string | null;
+  onSelect?: (assetId: string | null, modifiers: { multi: boolean; range: boolean }) => void;
+  selectedAssetIds?: string[];
   uploading?: boolean;
   onOpenGifSearch?: () => void;
 }
@@ -48,9 +49,10 @@ export default function AssetLibrary({
   assets,
   onUpload,
   onDelete,
+  onDeleteSelected,
   onDragStart,
   onSelect,
-  selectedAssetId,
+  selectedAssetIds = [],
   uploading = false,
   onOpenGifSearch,
 }: AssetLibraryProps) {
@@ -109,6 +111,16 @@ export default function AssetLibrary({
           >
             <Plus className="w-3.5 h-3.5" />
           </button>
+          {selectedAssetIds.length > 0 && onDeleteSelected && (
+            <button
+              onClick={onDeleteSelected}
+              className="p-1.5 bg-red-600 hover:bg-red-500 rounded text-xs transition-colors flex items-center gap-1"
+              title={`Delete ${selectedAssetIds.length} selected assets`}
+            >
+              <Trash2 className="w-3.5 h-3.5" />
+              {selectedAssetIds.length > 1 && <span className="text-[10px] font-bold">{selectedAssetIds.length}</span>}
+            </button>
+          )}
         </div>
       </div>
 
@@ -144,10 +156,17 @@ export default function AssetLibrary({
               <AssetCard
                 key={asset.id}
                 asset={asset}
-                isSelected={selectedAssetId === asset.id}
-                onSelect={() => onSelect?.(selectedAssetId === asset.id ? null : asset.id)}
+                isSelected={selectedAssetIds.includes(asset.id)}
+                onSelect={(modifiers) => onSelect?.(asset.id, modifiers)}
                 onDelete={() => onDelete(asset.id)}
-                onDragStart={() => onDragStart(asset)}
+                onDragStart={(e) => {
+                  const dragAssets = selectedAssetIds.includes(asset.id)
+                    ? assets.filter(a => selectedAssetIds.includes(a.id))
+                    : [asset];
+                  e.dataTransfer.setData('application/x-hyperedit-assets', JSON.stringify(dragAssets));
+                  e.dataTransfer.effectAllowed = 'copy';
+                  onDragStart(asset);
+                }}
               />
             ))}
 
@@ -176,9 +195,9 @@ export default function AssetLibrary({
 interface AssetCardProps {
   asset: Asset;
   isSelected?: boolean;
-  onSelect?: () => void;
+  onSelect?: (modifiers: { multi: boolean; range: boolean }) => void;
   onDelete: () => void;
-  onDragStart: () => void;
+  onDragStart: (e: React.DragEvent) => void;
 }
 
 function AssetCard({ asset, isSelected, onSelect, onDelete, onDragStart }: AssetCardProps) {
@@ -186,15 +205,18 @@ function AssetCard({ asset, isSelected, onSelect, onDelete, onDragStart }: Asset
   const colorClass = getAssetColor(asset.type);
 
   const handleDragStart = useCallback((e: React.DragEvent) => {
-    e.dataTransfer.setData('application/x-hyperedit-asset', JSON.stringify(asset));
-    e.dataTransfer.effectAllowed = 'copy';
-    onDragStart();
-  }, [asset, onDragStart]);
+    // We let the parent handle setting the data to support multi-drag easily
+    onDragStart(e);
+  }, [onDragStart]);
 
   const handleClick = useCallback((e: React.MouseEvent) => {
     // Don't select if clicking on buttons
     if ((e.target as HTMLElement).closest('button')) return;
-    onSelect?.();
+
+    onSelect?.({
+      multi: e.ctrlKey || e.metaKey,
+      range: e.shiftKey
+    });
   }, [onSelect]);
 
   return (
@@ -202,11 +224,10 @@ function AssetCard({ asset, isSelected, onSelect, onDelete, onDragStart }: Asset
       draggable
       onDragStart={handleDragStart}
       onClick={handleClick}
-      className={`group relative aspect-video bg-zinc-800 rounded-lg overflow-hidden cursor-grab active:cursor-grabbing border transition-colors ${
-        isSelected
-          ? 'border-orange-500 ring-2 ring-orange-500/30'
-          : 'border-zinc-700/50 hover:border-orange-500/50'
-      }`}
+      className={`group relative aspect-video bg-zinc-800 rounded-lg overflow-hidden cursor-grab active:cursor-grabbing border transition-colors ${isSelected
+        ? 'border-orange-500 ring-2 ring-orange-500/30'
+        : 'border-zinc-700/50 hover:border-orange-500/50'
+        }`}
     >
       {/* Thumbnail */}
       {asset.thumbnailUrl ? (

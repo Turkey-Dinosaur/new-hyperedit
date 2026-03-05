@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect } from 'react';
-import { Sparkles, Send, Wand2, Clock, Terminal, CheckCircle, Loader2, VolumeX, FileVideo, Type, Image, Zap, X, Scissors, Plus, Film, Music, MapPin, Timer, ImagePlus, Move } from 'lucide-react';
+import { Sparkles, Send, Wand2, Clock, Terminal, CheckCircle, Loader2, VolumeX, FileVideo, Type, Image, Zap, X, Scissors, Plus, Film, Music, MapPin, Timer, ImagePlus, Move, ListOrdered } from 'lucide-react';
 import type { TimelineClip, Track, Asset } from '@/react-app/hooks/useProject';
 import { MOTION_TEMPLATES, type TemplateId } from '@/remotion/templates';
 import MotionGraphicsPanel from './MotionGraphicsPanel';
@@ -179,6 +179,7 @@ interface AIPromptPanelProps {
   onGenerateTranscriptAnimation?: () => Promise<CustomAnimationResult>;
   onGenerateBatchAnimations?: (count: number) => Promise<{ animations: BatchAnimationResult[]; videoDuration: number }>;
   onExtractAudio?: () => Promise<ExtractAudioResult>;
+  onAutoOrder?: () => Promise<void>;
   onOpenAnimationInTab?: (assetId: string, animationName: string) => string | undefined;
   onEditAnimation?: (assetId: string, editPrompt: string, v1Context?: EditTabV1Context, tabIdToUpdate?: string) => Promise<{ assetId: string; duration: number; sceneCount: number }>;
   isApplying?: boolean;
@@ -213,6 +214,7 @@ export default function AIPromptPanel({
   onGenerateTranscriptAnimation,
   onGenerateBatchAnimations,
   onExtractAudio,
+  onAutoOrder,
   onOpenAnimationInTab,
   onEditAnimation,
   isApplying,
@@ -552,6 +554,7 @@ export default function AIPromptPanel({
     { icon: Film, text: 'Add 5 animations' },
     { icon: Move, text: 'Add Ken Burns zoom effect' },
     { icon: Music, text: 'Extract audio to A1' },
+    { icon: ListOrdered, text: 'Auto-order clips' },
   ];
 
   // Check if prompt is asking for a contextual animation (intro/outro that needs video context)
@@ -890,6 +893,7 @@ export default function AIPromptPanel({
     | 'transcript-animation' // Kinetic typography from speech
     | 'contextual-animation' // Animation based on video content
     | 'extract-audio'       // Extract audio to separate track
+    | 'auto-order'          // Chronological reorder
     | 'ffmpeg-edit'         // Direct FFmpeg video manipulation
     | 'unknown';            // Need to ask for clarification
 
@@ -918,9 +922,9 @@ export default function AIPromptPanel({
     // If user has selected an AI animation clip on the main timeline and wants to edit it
     if (ctx.selectedClipIsAiAnimation && !ctx.isOnEditTab) {
       const isEditIntent = lower.includes('edit') || lower.includes('change') ||
-                          lower.includes('modify') || lower.includes('update') ||
-                          lower.includes('make it') || lower.includes('adjust') ||
-                          lower.includes('add') || lower.includes('remove');
+        lower.includes('modify') || lower.includes('update') ||
+        lower.includes('make it') || lower.includes('adjust') ||
+        lower.includes('add') || lower.includes('remove');
       if (isEditIntent) {
         return 'edit-animation';
       }
@@ -931,15 +935,15 @@ export default function AIPromptPanel({
     if (ctx.isOnEditTab && ctx.editTabHasAnimation) {
       // Check if they're explicitly asking about the main video/timeline
       const isAboutMainVideo = lower.includes('main video') ||
-                               lower.includes('main timeline') ||
-                               lower.includes('original video');
+        lower.includes('main timeline') ||
+        lower.includes('original video');
 
       // Check if they're asking for something that only applies to video content (not animations)
       const isVideoOnlyFeature = lower.includes('caption') ||
-                                 lower.includes('subtitle') ||
-                                 lower.includes('dead air') ||
-                                 lower.includes('silence') ||
-                                 lower.includes('chapter');
+        lower.includes('subtitle') ||
+        lower.includes('dead air') ||
+        lower.includes('silence') ||
+        lower.includes('chapter');
 
       // If not explicitly about main video and not a video-only feature, edit the animation
       if (!isAboutMainVideo && !isVideoOnlyFeature) {
@@ -951,9 +955,9 @@ export default function AIPromptPanel({
 
     // Camera movement requests (should route to animation workflows)
     const isCameraMovement = lower.includes('zoom') || lower.includes('pan') ||
-                             lower.includes('ken burns') || lower.includes('camera') ||
-                             lower.includes('shake') || lower.includes('dolly') ||
-                             lower.includes('tracking shot') || lower.includes('tilt');
+      lower.includes('ken burns') || lower.includes('camera') ||
+      lower.includes('shake') || lower.includes('dolly') ||
+      lower.includes('tracking shot') || lower.includes('tilt');
 
     // If asking for camera movement on an existing animation, edit it
     if (isCameraMovement && (ctx.editTabHasAnimation || ctx.selectedClipIsAiAnimation)) {
@@ -966,100 +970,100 @@ export default function AIPromptPanel({
 
     // Caption-related requests
     if (lower.includes('caption') || lower.includes('subtitle') ||
-        lower.includes('transcribe') || lower.includes('transcription')) {
+      lower.includes('transcribe') || lower.includes('transcription')) {
       return 'captions';
     }
 
     // Dead air / silence removal
     if (lower.includes('dead air') || lower.includes('silence') ||
-        lower.includes('remove quiet') || lower.includes('remove pauses')) {
+      lower.includes('remove quiet') || lower.includes('remove pauses')) {
       return 'dead-air';
     }
 
     // Extract audio from video
     if ((lower.includes('extract') && lower.includes('audio')) ||
-        (lower.includes('separate') && lower.includes('audio')) ||
-        (lower.includes('split') && lower.includes('audio')) ||
-        (lower.includes('remove') && lower.includes('audio') && lower.includes('track')) ||
-        (lower.includes('audio') && lower.includes('to') && (lower.includes('a1') || lower.includes('track')))) {
+      (lower.includes('separate') && lower.includes('audio')) ||
+      (lower.includes('split') && lower.includes('audio')) ||
+      (lower.includes('remove') && lower.includes('audio') && lower.includes('track')) ||
+      (lower.includes('audio') && lower.includes('to') && (lower.includes('a1') || lower.includes('track')))) {
       return 'extract-audio';
     }
 
     // Chapter cuts
     if (lower.includes('chapter') || lower.includes('split into sections') ||
-        lower.includes('segment') || (lower.includes('cut') && lower.includes('topic'))) {
+      lower.includes('segment') || (lower.includes('cut') && lower.includes('topic'))) {
       return 'chapter-cuts';
     }
 
     // GIF-related requests
     if (lower.includes('gif') || lower.includes('giphy') ||
-        (lower.includes('add') && lower.includes('meme'))) {
+      (lower.includes('add') && lower.includes('meme'))) {
       return 'auto-gif';
     }
 
     // B-roll with Remotion -> treat as batch animations
     if ((lower.includes('b-roll') || lower.includes('broll')) &&
-        (lower.includes('remotion') || lower.includes('animation'))) {
+      (lower.includes('remotion') || lower.includes('animation'))) {
       return 'batch-animations';
     }
 
     // B-roll requests (static images)
     if (lower.includes('b-roll') || lower.includes('broll') ||
-        lower.includes('stock image') || lower.includes('overlay image')) {
+      lower.includes('stock image') || lower.includes('overlay image')) {
       return 'b-roll';
     }
 
     // Transcript animation (kinetic typography)
     if ((lower.includes('transcript') && lower.includes('animation')) ||
-        lower.includes('kinetic typography') || lower.includes('animate the words') ||
-        lower.includes('animate text from speech')) {
+      lower.includes('kinetic typography') || lower.includes('animate the words') ||
+      lower.includes('animate text from speech')) {
       return 'transcript-animation';
     }
 
     // Motion graphics templates (specific template types)
     if (lower.includes('lower third') || lower.includes('counter') ||
-        lower.includes('progress bar') || lower.includes('call to action') ||
-        lower.includes('cta') || lower.includes('subscribe button') ||
-        lower.includes('logo reveal') || lower.includes('testimonial')) {
+      lower.includes('progress bar') || lower.includes('call to action') ||
+      lower.includes('cta') || lower.includes('subscribe button') ||
+      lower.includes('logo reveal') || lower.includes('testimonial')) {
       return 'motion-graphics';
     }
 
     // Contextual animation (based on video content at a specific time)
     if (ctx.hasTimeRange && (lower.includes('animation') || lower.includes('animate') ||
-        lower.includes('visual') || lower.includes('graphic'))) {
+      lower.includes('visual') || lower.includes('graphic'))) {
       return 'contextual-animation';
     }
 
     // Batch animations (multiple animations across the video)
     // Patterns: "add 5 animations", "create 3 animations", "generate animations throughout"
     const batchAnimationMatch = lower.match(/(?:add|create|generate|make)\s+(\d+)\s+animation/i) ||
-                                lower.match(/(\d+)\s+animation/i);
+      lower.match(/(\d+)\s+animation/i);
     if (batchAnimationMatch ||
-        (lower.includes('animations') && (lower.includes('throughout') || lower.includes('across') || lower.includes('multiple')))) {
+      (lower.includes('animations') && (lower.includes('throughout') || lower.includes('across') || lower.includes('multiple')))) {
       return 'batch-animations';
     }
 
     // Create new animation (explicit creation requests)
     if ((lower.includes('create') || lower.includes('make') || lower.includes('generate') ||
-         lower.includes('add') || lower.includes('build') || lower.includes('design')) &&
-        (lower.includes('animation') || lower.includes('animated') || lower.includes('motion') ||
-         lower.includes('graphic') || lower.includes('visual') || lower.includes('overlay') ||
-         lower.includes('intro') || lower.includes('outro') || lower.includes('title card') ||
-         lower.includes('text overlay') || lower.includes('infographic') || lower.includes('scene'))) {
+      lower.includes('add') || lower.includes('build') || lower.includes('design')) &&
+      (lower.includes('animation') || lower.includes('animated') || lower.includes('motion') ||
+        lower.includes('graphic') || lower.includes('visual') || lower.includes('overlay') ||
+        lower.includes('intro') || lower.includes('outro') || lower.includes('title card') ||
+        lower.includes('text overlay') || lower.includes('infographic') || lower.includes('scene'))) {
       return 'create-animation';
     }
 
     // Remotion animation keywords without explicit create/make verbs
     // Things like "a title card showing...", "intro with my logo", "stats animation"
     if (lower.includes('animation') || lower.includes('animated') ||
-        lower.includes('title card') || lower.includes('intro ') || lower.includes('outro ') ||
-        lower.includes('end screen') || lower.includes('infographic') ||
-        lower.includes('text effect') || lower.includes('kinetic text') ||
-        lower.includes('data visual') || lower.includes('chart ') || lower.includes('graph ') ||
-        lower.includes('countdown') || lower.includes('timer') ||
-        lower.includes('logo animation') || lower.includes('logo reveal') ||
-        lower.includes('screen mockup') || lower.includes('phone mockup') ||
-        lower.includes('social proof') || lower.includes('comparison')) {
+      lower.includes('title card') || lower.includes('intro ') || lower.includes('outro ') ||
+      lower.includes('end screen') || lower.includes('infographic') ||
+      lower.includes('text effect') || lower.includes('kinetic text') ||
+      lower.includes('data visual') || lower.includes('chart ') || lower.includes('graph ') ||
+      lower.includes('countdown') || lower.includes('timer') ||
+      lower.includes('logo animation') || lower.includes('logo reveal') ||
+      lower.includes('screen mockup') || lower.includes('phone mockup') ||
+      lower.includes('social proof') || lower.includes('comparison')) {
       // If we have an animation in context, edit it
       if (ctx.editTabHasAnimation || ctx.selectedClipIsAiAnimation) {
         return 'edit-animation';
@@ -1074,8 +1078,8 @@ export default function AIPromptPanel({
 
     // Animation editing language when there might be an animation in context
     if (lower.includes('animation') &&
-        (lower.includes('change') || lower.includes('modify') || lower.includes('update') ||
-         lower.includes('edit') || lower.includes('adjust'))) {
+      (lower.includes('change') || lower.includes('modify') || lower.includes('update') ||
+        lower.includes('edit') || lower.includes('adjust'))) {
       // If we have an animation asset in the edit tab, edit it
       if (ctx.editTabHasAnimation) {
         return 'edit-animation';
@@ -1084,11 +1088,17 @@ export default function AIPromptPanel({
       return 'create-animation';
     }
 
+    // Auto order clips
+    if (lower.includes('auto order') || lower.includes('auto-order') || lower.includes('reorder') ||
+      lower.includes('sort clips') || lower.includes('chronological')) {
+      return 'auto-order';
+    }
+
     // FFmpeg-style video edits (trim, cut, speed, etc.)
     if (lower.includes('trim') || lower.includes('cut') || lower.includes('speed') ||
-        lower.includes('slow') || lower.includes('fast') || lower.includes('reverse') ||
-        lower.includes('crop') || lower.includes('rotate') || lower.includes('flip') ||
-        lower.includes('brightness') || lower.includes('contrast') || lower.includes('filter')) {
+      lower.includes('slow') || lower.includes('fast') || lower.includes('reverse') ||
+      lower.includes('crop') || lower.includes('rotate') || lower.includes('flip') ||
+      lower.includes('brightness') || lower.includes('contrast') || lower.includes('filter')) {
       return 'ffmpeg-edit';
     }
 
@@ -1286,7 +1296,7 @@ export default function AIPromptPanel({
     // Animated Text detection
     if (lower.includes('animated text') || lower.includes('text animation')) {
       const textMatch = text.match(/(?:text|saying?|with)\s*[:\-"]?\s*["']([^"']+)["']/i) ||
-                        text.match(/["']([^"']+)["']/);
+        text.match(/["']([^"']+)["']/);
 
       return {
         templateId: 'animated-text',
@@ -1294,9 +1304,9 @@ export default function AIPromptPanel({
           ...MOTION_TEMPLATES['animated-text'].defaultProps,
           text: textMatch?.[1] || 'Your Text Here',
           style: lower.includes('typewriter') ? 'typewriter' :
-                 lower.includes('bounce') ? 'bounce' :
-                 lower.includes('glitch') ? 'glitch' :
-                 lower.includes('fade') ? 'fade-up' : 'typewriter',
+            lower.includes('bounce') ? 'bounce' :
+              lower.includes('glitch') ? 'glitch' :
+                lower.includes('fade') ? 'fade-up' : 'typewriter',
         },
         duration: 3,
         startTime: currentTime,
@@ -1334,7 +1344,7 @@ export default function AIPromptPanel({
           progress: percentMatch ? parseInt(percentMatch[1]) : 75,
           label: labelMatch?.[1]?.trim() || 'Progress',
           style: lower.includes('circular') ? 'circular' :
-                 lower.includes('neon') ? 'neon' : 'linear',
+            lower.includes('neon') ? 'neon' : 'linear',
         },
         duration: 3,
         startTime: currentTime,
@@ -1343,14 +1353,14 @@ export default function AIPromptPanel({
 
     // Call to Action detection
     if (lower.includes('call to action') || lower.includes('cta') ||
-        lower.includes('subscribe button') || lower.includes('like button')) {
+      lower.includes('subscribe button') || lower.includes('like button')) {
       return {
         templateId: 'call-to-action',
         props: {
           ...MOTION_TEMPLATES['call-to-action'].defaultProps,
           type: lower.includes('like') ? 'like' :
-                lower.includes('follow') ? 'follow' :
-                lower.includes('share') ? 'share' : 'subscribe',
+            lower.includes('follow') ? 'follow' :
+              lower.includes('share') ? 'share' : 'subscribe',
         },
         duration: 3,
         startTime: currentTime,
@@ -1359,7 +1369,7 @@ export default function AIPromptPanel({
 
     // Logo Reveal detection
     if (lower.includes('logo reveal') || lower.includes('logo animation') ||
-        lower.includes('intro animation') || lower.includes('outro')) {
+      lower.includes('intro animation') || lower.includes('outro')) {
       const logoMatch = text.match(/(?:logo|brand|text)\s*[:\-"]?\s*["']?([A-Za-z0-9\s]+?)["']?(?:\s|,|$)/i);
       const taglineMatch = text.match(/(?:tagline|slogan)\s*[:\-"]?\s*["']([^"']+)["']/i);
 
@@ -1370,8 +1380,8 @@ export default function AIPromptPanel({
           logoText: logoMatch?.[1]?.trim() || 'LOGO',
           tagline: taglineMatch?.[1] || 'Your tagline here',
           style: lower.includes('glitch') ? 'glitch' :
-                 lower.includes('scale') ? 'scale' :
-                 lower.includes('slide') ? 'slide' : 'scale',
+            lower.includes('scale') ? 'scale' :
+              lower.includes('slide') ? 'slide' : 'scale',
         },
         duration: 4,
         startTime: currentTime,
@@ -1385,8 +1395,8 @@ export default function AIPromptPanel({
         props: {
           ...MOTION_TEMPLATES['screen-frame'].defaultProps,
           frameType: lower.includes('phone') || lower.includes('mobile') ? 'phone' :
-                     lower.includes('tablet') || lower.includes('ipad') ? 'tablet' :
-                     lower.includes('desktop') ? 'desktop' : 'browser',
+            lower.includes('tablet') || lower.includes('ipad') ? 'tablet' :
+              lower.includes('desktop') ? 'desktop' : 'browser',
           style: lower.includes('light') ? 'light' : 'dark',
         },
         duration: 4,
@@ -1404,7 +1414,7 @@ export default function AIPromptPanel({
         props: {
           ...MOTION_TEMPLATES['social-proof'].defaultProps,
           type: lower.includes('rating') ? 'rating' :
-                lower.includes('stats') ? 'stats' : 'testimonial',
+            lower.includes('stats') ? 'stats' : 'testimonial',
           quote: quoteMatch?.[1] || '"This product changed everything for us."',
           author: authorMatch?.[1]?.trim() || 'Jane Doe',
         },
@@ -1420,8 +1430,8 @@ export default function AIPromptPanel({
         props: {
           ...MOTION_TEMPLATES['comparison'].defaultProps,
           type: lower.includes('slide') ? 'slider' :
-                lower.includes('flip') ? 'flip' :
-                lower.includes('fade') ? 'fade' : 'side-by-side',
+            lower.includes('flip') ? 'flip' :
+              lower.includes('fade') ? 'fade' : 'side-by-side',
         },
         duration: 5,
         startTime: currentTime,
@@ -1435,8 +1445,8 @@ export default function AIPromptPanel({
         props: {
           ...MOTION_TEMPLATES['data-chart'].defaultProps,
           type: lower.includes('pie') ? 'pie' :
-                lower.includes('donut') ? 'donut' :
-                lower.includes('line') ? 'line' : 'bar',
+            lower.includes('donut') ? 'donut' :
+              lower.includes('line') ? 'line' : 'bar',
           title: 'Monthly Revenue',
         },
         duration: 4,
@@ -1908,6 +1918,28 @@ export default function AIPromptPanel({
   };
 
   // Handle extract audio workflow (separates audio to A1 track, mutes video)
+  const handleAutoOrderWorkflow = async () => {
+    if (!onAutoOrder) return;
+
+    setChatHistory(prev => [...prev, {
+      type: 'assistant',
+      text: 'Sorting clips from earliest to latest based on timestamped file names.... 🕒',
+    }]);
+
+    try {
+      await onAutoOrder();
+      setChatHistory(prev => [...prev, {
+        type: 'assistant',
+        text: 'Done! I\'ve reordered your clips based on the timestamps in their filenames. Everything is now in chronological order. ✅',
+      }]);
+    } catch (error) {
+      setChatHistory(prev => [...prev, {
+        type: 'assistant',
+        text: `Sorry, I couldn't reorder the clips: ${error instanceof Error ? error.message : 'Unknown error'}`,
+      }]);
+    }
+  };
+
   const handleExtractAudioWorkflow = async () => {
     if (!onExtractAudio) return;
 
@@ -1988,7 +2020,7 @@ export default function AIPromptPanel({
     // 1. Tabs created via "Open in Tab" (animationAsset.aiGenerated)
     // 2. Manual tabs where user dragged an AI animation to V1 (editTabV1Context.aiGenerated)
     const editTabHasRemotionAnimation = !!(animationAsset && animationAsset.aiGenerated) ||
-                                         !!(editTabV1Context?.aiGenerated);
+      !!(editTabV1Context?.aiGenerated);
 
     // For edit detection: trust either the tab metadata (assetId set) OR the aiGenerated flag
     // This ensures we route to edit-animation even if there's a timing issue with assets state
@@ -2056,8 +2088,8 @@ export default function AIPromptPanel({
     // 2. V1 clip's asset ID in edit tab (for manual tabs with dragged animations)
     // 3. editTabAssetId (for tabs created via "Edit in new tab")
     const animationAssetIdToEdit = directorContext.selectedAiAnimationAssetId ||
-                                   editTabV1Context?.assetId ||
-                                   editTabAssetId;
+      editTabV1Context?.assetId ||
+      editTabAssetId;
     if (workflow === 'edit-animation' && animationAssetIdToEdit && onEditAnimation) {
       console.log('[Director] Editing animation with asset ID:', animationAssetIdToEdit);
       console.log('[Director] Source: selectedAiAnimation=%s, editTabV1Context=%s, editTabAssetId=%s',
@@ -2147,6 +2179,12 @@ export default function AIPromptPanel({
         return;
       }
       await handleExtractAudioWorkflow();
+      return;
+    }
+
+    // Auto order clips
+    if (workflow === 'auto-order') {
+      await handleAutoOrderWorkflow();
       return;
     }
 
@@ -2278,9 +2316,8 @@ export default function AIPromptPanel({
 
   return (
     <div
-      className={`h-full bg-zinc-900/80 border-l border-zinc-800/50 flex flex-col backdrop-blur-sm transition-colors relative ${
-        isDragOverChat ? 'ring-2 ring-inset ring-purple-500/50 bg-purple-500/5' : ''
-      }`}
+      className={`h-full bg-zinc-900/80 border-l border-zinc-800/50 flex flex-col backdrop-blur-sm transition-colors relative ${isDragOverChat ? 'ring-2 ring-inset ring-purple-500/50 bg-purple-500/5' : ''
+        }`}
       onDragOver={handleDragOver}
       onDragLeave={handleDragLeave}
       onDrop={handleDrop}
@@ -2463,10 +2500,10 @@ export default function AIPromptPanel({
                       <div className="mt-2 flex items-center gap-2 px-3 py-2 bg-emerald-500/20 rounded-lg text-xs font-medium text-emerald-400">
                         <CheckCircle className="w-3 h-3" />
                         {message.isCaptionWorkflow ? 'Captions added to timeline' :
-                         message.isBrollWorkflow ? 'B-roll images added to V3 track' :
-                         message.isDeadAirWorkflow ? 'Dead air removed from timeline' :
-                         message.isInPlaceEdit ? 'Edit added to animation' :
-                         'GIFs added to timeline'}
+                          message.isBrollWorkflow ? 'B-roll images added to V3 track' :
+                            message.isDeadAirWorkflow ? 'Dead air removed from timeline' :
+                              message.isInPlaceEdit ? 'Edit added to animation' :
+                                'GIFs added to timeline'}
                       </div>
                     )}
 
@@ -2612,11 +2649,10 @@ export default function AIPromptPanel({
             type="button"
             onClick={() => setShowQuickActions(!showQuickActions)}
             disabled={!hasVideo || isProcessing}
-            className={`w-full flex items-center justify-center gap-2 px-4 py-2.5 rounded-lg text-sm font-medium transition-all ${
-              showQuickActions
-                ? 'bg-orange-500/20 text-orange-400 ring-1 ring-orange-500/50'
-                : 'bg-zinc-800 hover:bg-zinc-700 text-zinc-300 disabled:opacity-50 disabled:cursor-not-allowed'
-            }`}
+            className={`w-full flex items-center justify-center gap-2 px-4 py-2.5 rounded-lg text-sm font-medium transition-all ${showQuickActions
+              ? 'bg-orange-500/20 text-orange-400 ring-1 ring-orange-500/50'
+              : 'bg-zinc-800 hover:bg-zinc-700 text-zinc-300 disabled:opacity-50 disabled:cursor-not-allowed'
+              }`}
           >
             <Zap className="w-4 h-4" />
             Quick Actions
@@ -2729,11 +2765,10 @@ export default function AIPromptPanel({
                   type="button"
                   onClick={() => setShowReferencePicker(!showReferencePicker)}
                   disabled={!hasVideo || isProcessing}
-                  className={`p-1.5 rounded-md transition-all ${
-                    showReferencePicker
-                      ? 'bg-orange-500/20 text-orange-400'
-                      : 'hover:bg-zinc-700 text-zinc-400 hover:text-zinc-300 disabled:opacity-50'
-                  }`}
+                  className={`p-1.5 rounded-md transition-all ${showReferencePicker
+                    ? 'bg-orange-500/20 text-orange-400'
+                    : 'hover:bg-zinc-700 text-zinc-400 hover:text-zinc-300 disabled:opacity-50'
+                    }`}
                   title="Add asset from library"
                 >
                   <Plus className="w-4 h-4" />
@@ -2804,11 +2839,10 @@ export default function AIPromptPanel({
                               <div className="flex-1 min-w-0">
                                 <div className="text-sm text-zinc-200 truncate font-medium">{friendlyName}</div>
                                 <div className="flex items-center gap-1.5 mt-0.5">
-                                  <span className={`text-[10px] px-1.5 py-0.5 rounded ${
-                                    asset.type === 'video' ? 'bg-blue-500/20 text-blue-300' :
+                                  <span className={`text-[10px] px-1.5 py-0.5 rounded ${asset.type === 'video' ? 'bg-blue-500/20 text-blue-300' :
                                     asset.type === 'image' ? 'bg-purple-500/20 text-purple-300' :
-                                    'bg-emerald-500/20 text-emerald-300'
-                                  }`}>
+                                      'bg-emerald-500/20 text-emerald-300'
+                                    }`}>
                                     {asset.type}
                                   </span>
                                   {asset.aiGenerated && (
@@ -2841,11 +2875,10 @@ export default function AIPromptPanel({
                   type="button"
                   onClick={() => fileInputRef.current?.click()}
                   disabled={!hasVideo || isProcessing || isUploadingAttachment || !onUploadAttachment}
-                  className={`p-1.5 rounded-md transition-all ${
-                    attachedAssets.length > 0
-                      ? 'bg-purple-500/20 text-purple-400'
-                      : 'hover:bg-zinc-700 text-zinc-400 hover:text-zinc-300 disabled:opacity-50'
-                  }`}
+                  className={`p-1.5 rounded-md transition-all ${attachedAssets.length > 0
+                    ? 'bg-purple-500/20 text-purple-400'
+                    : 'hover:bg-zinc-700 text-zinc-400 hover:text-zinc-300 disabled:opacity-50'
+                    }`}
                   title={attachedAssets.length > 0 ? `${attachedAssets.length} file(s) attached` : 'Attach images/videos for animation'}
                 >
                   {isUploadingAttachment ? (
@@ -2873,11 +2906,10 @@ export default function AIPromptPanel({
                     setShowTimeRangePicker(!showTimeRangePicker);
                   }}
                   disabled={!hasVideo || isProcessing}
-                  className={`p-1.5 rounded-md transition-all ${
-                    showTimeRangePicker || timeRange
-                      ? 'bg-blue-500/20 text-blue-400'
-                      : 'hover:bg-zinc-700 text-zinc-400 hover:text-zinc-300 disabled:opacity-50'
-                  }`}
+                  className={`p-1.5 rounded-md transition-all ${showTimeRangePicker || timeRange
+                    ? 'bg-blue-500/20 text-blue-400'
+                    : 'hover:bg-zinc-700 text-zinc-400 hover:text-zinc-300 disabled:opacity-50'
+                    }`}
                   title={timeRange ? `${formatTimeShort(timeRange.start)} - ${formatTimeShort(timeRange.end)}` : 'Set time range'}
                 >
                   <Timer className="w-4 h-4" />

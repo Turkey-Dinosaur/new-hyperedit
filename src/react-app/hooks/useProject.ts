@@ -442,16 +442,138 @@ export function useProject() {
     });
   }, []);
 
-  // Move clip
+  // Helper for magnetic snapping
+  const getMagneticSnapPosition = (rawStart: number, duration: number, trackId: string, excludeClipId?: string, trackClipsObj?: TimelineClip[]): number => {
+    let snappedStart = Math.max(0, rawStart);
+    const clipsToSearch = trackClipsObj || clips;
+    const trackClips = clipsToSearch.filter(c => c.trackId === trackId && c.id !== excludeClipId);
+    let bestSnapDiff = 0.5; // Snap threshold (0.5 seconds)
+
+    trackClips.forEach(c => {
+      const cEnd = c.start + c.duration;
+      // Snap start to other's end
+      if (Math.abs(snappedStart - cEnd) < bestSnapDiff) {
+        snappedStart = cEnd;
+        bestSnapDiff = Math.abs(snappedStart - cEnd);
+      }
+      // Snap start to other's start
+      if (Math.abs(snappedStart - c.start) < bestSnapDiff) {
+        snappedStart = c.start;
+        bestSnapDiff = Math.abs(snappedStart - c.start);
+      }
+      // Snap end to other's start
+      const end = snappedStart + duration;
+      if (Math.abs(end - c.start) < bestSnapDiff) {
+        snappedStart = c.start - duration;
+        bestSnapDiff = Math.abs(end - c.start);
+      }
+      // Snap end to other's end
+      if (Math.abs(end - cEnd) < bestSnapDiff) {
+        snappedStart = cEnd - duration;
+        bestSnapDiff = Math.abs(end - cEnd);
+      }
+    });
+    return Math.max(0, snappedStart);
+  };
+
+  // Move clip (with magnetic snapping)
   const moveClip = useCallback((clipId: string, newStart: number, newTrackId?: string): void => {
-    setClips(prev => prev.map(c => {
-      if (c.id !== clipId) return c;
-      return {
-        ...c,
-        start: Math.max(0, newStart),
-        trackId: newTrackId ?? c.trackId,
-      };
-    }));
+    setClips(prev => {
+      const clip = prev.find(c => c.id === clipId);
+      if (!clip) return prev;
+
+      const trackId = newTrackId ?? clip.trackId;
+      const snappedStart = getMagneticSnapPosition(newStart, clip.duration, trackId, clipId, prev);
+
+      // Return unchanged reference if nothing changed to prevent unnecessary renders
+      if (clip.start === snappedStart && clip.trackId === trackId) return prev;
+
+      return prev.map(c => {
+        if (c.id !== clipId) return c;
+        return {
+          ...c,
+          start: snappedStart,
+          trackId,
+        };
+      });
+    });
+  }, []);
+
+  // Finalize clip move (resolves collisions: ripples if inserted, bumps track if placed over)
+  const finalizeClipMove = useCallback((clipId: string): void => {
+    setClips(prev => {
+      const clip = prev.find(c => c.id === clipId);
+      if (!clip) return prev;
+
+      const trackClips = prev.filter(c => c.trackId === clip.trackId && c.id !== clipId);
+      const end = clip.start + clip.duration;
+
+      // Look for overlaps
+      const overlaps = trackClips.filter(c => {
+        const cEnd = c.start + c.duration;
+        return clip.start < cEnd - 0.05 && end > c.start + 0.05; // 0.05s tolerance
+      });
+
+      if (overlaps.length === 0) return prev; // No overlaps, we are good
+
+      // Sort overlaps by start time
+      overlaps.sort((a, b) => a.start - b.start);
+      const firstOverlap = overlaps[0];
+
+      // Did we snap to the end of a prior clip (or drop at exactly 0)?
+      const snappedToPrev = trackClips.some(c => Math.abs((c.start + c.duration) - clip.start) <= 0.05);
+      const isStartInsert = clip.start <= 0.05;
+
+      if (snappedToPrev || isStartInsert) {
+        // INSERTION RIPPLE
+        // Shift clips that start AT OR AFTER the first overlapped clip to the right
+        const shiftAmount = end - firstOverlap.start;
+        if (shiftAmount > 0) {
+          return prev.map(c => {
+            if (c.trackId === clip.trackId && c.id !== clipId && c.start >= firstOverlap.start - 0.05) {
+              return { ...c, start: c.start + shiftAmount };
+            }
+            return c;
+          });
+        }
+        return prev;
+      }
+
+      // OVERLAP BUMP
+      // Find the next available track of the same type
+      const currentTrack = tracksRef.current.find(t => t.id === clip.trackId);
+      if (!currentTrack) return prev;
+
+      const trackType = currentTrack.type;
+      const sameTypeTracks = tracksRef.current.filter(t => t.type === trackType).sort((a, b) => a.order - b.order);
+
+      // Find a track that has NO overlaps at this exact time interval
+      let newTrackId = clip.trackId;
+      for (const track of sameTypeTracks) {
+        if (track.id === clip.trackId) continue;
+
+        const potentialOverlaps = prev.filter(c =>
+          c.trackId === track.id &&
+          c.id !== clipId &&
+          clip.start < c.start + c.duration - 0.05 &&
+          end > c.start + 0.05
+        );
+
+        if (potentialOverlaps.length === 0) {
+          newTrackId = track.id;
+          break;
+        }
+      }
+
+      if (newTrackId !== clip.trackId) {
+        return prev.map(c => c.id === clipId ? { ...c, trackId: newTrackId } : c);
+      }
+
+      // If all existing tracks are full, bump it rightward to the end of the last overlap on the current track
+      const lastOverlap = overlaps[overlaps.length - 1];
+      const newStartForBump = lastOverlap.start + lastOverlap.duration;
+      return prev.map(c => c.id === clipId ? { ...c, start: newStartForBump } : c);
+    });
   }, []);
 
   // Resize clip (change in/out points or duration)
@@ -911,7 +1033,7 @@ export function useProject() {
         await fetch(`${LOCAL_FFMPEG_URL}/session/${session.sessionId}`, {
           method: 'DELETE',
         });
-      } catch {}
+      } catch { }
     }
     setSession(null);
     setAssets([]);
@@ -954,6 +1076,7 @@ export function useProject() {
     updateClip,
     deleteClip,
     moveClip,
+    finalizeClipMove,
     resizeClip,
     splitClip,
 
