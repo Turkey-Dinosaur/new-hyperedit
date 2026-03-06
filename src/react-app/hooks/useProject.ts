@@ -77,8 +77,8 @@ export interface CaptionData {
 
 // Project settings
 export interface ProjectSettings {
-  width: number;
-  height: number;
+  width?: number;
+  height?: number;
   fps: number;
 }
 
@@ -130,7 +130,45 @@ export function useProject() {
     { id: 'A2', type: 'audio', name: 'A2', order: 5 },  // Audio track 2
   ]);
   const [clips, setClips] = useState<TimelineClip[]>([]);
+  const [undoHistory, setUndoHistory] = useState<TimelineClip[][]>([]);
+  const [redoHistory, setRedoHistory] = useState<TimelineClip[][]>([]);
   const [captionData, setCaptionData] = useState<Record<string, CaptionData>>({});
+
+  // History Recording Helper
+  const recordHistory = useCallback((currentClips: TimelineClip[]) => {
+    setUndoHistory(prev => {
+      const next = [...prev, [...currentClips]];
+      if (next.length > 50) next.shift(); // Limit history to 50 states
+      return next;
+    });
+    setRedoHistory([]);
+  }, []);
+
+  // Undo / Redo Actions
+  const undo = useCallback(() => {
+    setUndoHistory(prev => {
+      if (prev.length === 0) return prev;
+      const historyCopy = [...prev];
+      const previousState = historyCopy.pop()!;
+      setRedoHistory(rList => [[...clips], ...rList]);
+      setClips(previousState);
+      return historyCopy;
+    });
+  }, [clips]);
+
+  const redo = useCallback(() => {
+    setRedoHistory(prev => {
+      if (prev.length === 0) return prev;
+      const historyCopy = [...prev];
+      const nextState = historyCopy.shift()!;
+      setUndoHistory(uList => [...uList, [...clips]]);
+      setClips(nextState);
+      return historyCopy;
+    });
+  }, [clips]);
+
+  const canUndo = undoHistory.length > 0;
+  const canRedo = redoHistory.length > 0;
 
   // Timeline tabs for editing clips in isolation
   const [timelineTabs, setTimelineTabs] = useState<TimelineTab[]>([
@@ -152,8 +190,8 @@ export function useProject() {
   }, [activeTabId]);
 
   const [settings, setSettings] = useState<ProjectSettings>({
-    width: 1920,
-    height: 1080,
+    width: undefined,
+    height: undefined,
     fps: 30,
   });
   const [loading, setLoading] = useState(false);
@@ -403,22 +441,28 @@ export function useProject() {
       outPoint: outPoint ?? clipDuration,
     };
 
-    setClips(prev => [...prev, clip]);
+    setClips(prev => {
+      recordHistory(prev);
+      return [...prev, clip];
+    });
     return clip;
   }, [assets]);
 
   // Update clip
   const updateClip = useCallback((clipId: string, updates: Partial<TimelineClip>): void => {
-    setClips(prev => prev.map(c =>
-      c.id === clipId ? { ...c, ...updates } : c
-    ));
-  }, []);
+    setClips(prev => {
+      recordHistory(prev);
+      return prev.map(c => c.id === clipId ? { ...c, ...updates } : c);
+    });
+  }, [recordHistory]);
 
   // Delete clip (with optional ripple/autosnap to shift subsequent clips)
   const deleteClip = useCallback((clipId: string, ripple: boolean = false): void => {
     setClips(prev => {
       const clipToDelete = prev.find(c => c.id === clipId);
       if (!clipToDelete) return prev.filter(c => c.id !== clipId);
+
+      recordHistory(prev); // Record history only if there was a clip to delete
 
       // Remove the clip
       const filtered = prev.filter(c => c.id !== clipId);
@@ -440,7 +484,7 @@ export function useProject() {
         return c;
       });
     });
-  }, []);
+  }, [recordHistory]);
 
   // Helper for magnetic snapping
   const getMagneticSnapPosition = (rawStart: number, duration: number, trackId: string, excludeClipId?: string, trackClipsObj?: TimelineClip[]): number => {
@@ -448,6 +492,12 @@ export function useProject() {
     const clipsToSearch = trackClipsObj || clips;
     const trackClips = clipsToSearch.filter(c => c.trackId === trackId && c.id !== excludeClipId);
     let bestSnapDiff = 0.5; // Snap threshold (0.5 seconds)
+
+    // Snap to 0 (beginning of timeline)
+    if (rawStart < bestSnapDiff && rawStart >= 0) {
+      snappedStart = 0;
+      bestSnapDiff = rawStart;
+    }
 
     trackClips.forEach(c => {
       const cEnd = c.start + c.duration;
@@ -1079,6 +1129,12 @@ export function useProject() {
     finalizeClipMove,
     resizeClip,
     splitClip,
+
+    // Undo / Redo
+    undo,
+    redo,
+    canUndo,
+    canRedo,
 
     // Captions
     captionData,

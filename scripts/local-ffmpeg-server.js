@@ -39,6 +39,8 @@ const SESSIONS_DIR = join(TEMP_DIR, 'sessions');
 
 // Active video sessions - keeps videos on disk between edits
 const sessions = new Map();
+// Active background jobs (progress tracking)
+const jobs = new Map();
 
 // Ensure temp directories exist
 if (!existsSync(TEMP_DIR)) {
@@ -2085,7 +2087,6 @@ async function handleRenderDownload(req, res, sessionId, renderType) {
   }
 
   // Find the render file
-  const { readdirSync } = require('fs');
   const files = readdirSync(session.rendersDir);
 
   let renderFile;
@@ -7354,6 +7355,226 @@ async function handleExtractAudio(req, res, sessionId) {
   }
 }
 
+// Get video stream info
+function getVideoInfo(filePath) {
+  try {
+    const result = execSync(`ffprobe -v error -select_streams v:0 -show_entries stream=width,height,r_frame_rate,pix_fmt -of json "${filePath}"`);
+    const data = JSON.parse(result.toString());
+    return data.streams[0];
+  } catch (e) {
+    return null;
+  }
+}
+
+// Check if a media file has an audio stream
+function hasAudioStream(filePath) {
+  try {
+    const result = execSync(`ffprobe -v error -select_streams a -show_entries stream=codec_type -of csv=p=0 "${filePath}"`);
+    return result.toString().trim().length > 0;
+  } catch (e) {
+    return false;
+  }
+}
+
+// Check if all clips have identical properties for fast concat (-c copy)
+async function checkFastConcatCompatibility(session, clips) {
+  if (clips.length <= 1) return false;
+  let firstMeta = null;
+  for (const clip of clips) {
+    const asset = session.assets.get(clip.assetId);
+    if (!asset) return false;
+    // Fast path only if No Trimming (frame accuracy issues with -c copy on trimmed clips)
+    if ((clip.inPoint && clip.inPoint > 0.1) || (clip.duration && Math.abs(clip.duration - asset.duration) > 0.1)) return false;
+    const meta = getVideoInfo(asset.path);
+    if (!meta) return false;
+    if (!firstMeta) firstMeta = meta;
+    else if (meta.width !== firstMeta.width || meta.height !== firstMeta.height ||
+      meta.r_frame_rate !== firstMeta.r_frame_rate || meta.pix_fmt !== firstMeta.pix_fmt) return false;
+  }
+  return true;
+}
+
+// Get job progress
+async function handleMergeProgress(req, res, sessionId) {
+  const url = new URL(req.url, `http://localhost:${PORT}`);
+  const pathParts = url.pathname.split('/');
+  const jobId = pathParts[pathParts.length - 1];
+  const job = jobs.get(jobId);
+  if (!job) {
+    res.writeHead(404, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+    res.end(JSON.stringify({ error: 'Job not found' }));
+    return;
+  }
+  res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+  res.end(JSON.stringify(job));
+}
+
+// Merge all video clips on timeline sequentially
+async function handleMergeAll(req, res, sessionId) {
+  const session = getSession(sessionId);
+  if (!session) {
+    res.writeHead(404, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+    res.end(JSON.stringify({ error: 'Session not found' }));
+    return;
+  }
+
+  try {
+    const body = await parseBody(req);
+    const { clips } = body;
+    if (!clips || !Array.isArray(clips) || clips.length === 0) {
+      res.writeHead(400, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+      res.end(JSON.stringify({ error: 'Valid clips array is required' }));
+      return;
+    }
+
+    const jobId = randomUUID();
+    const newAssetId = randomUUID();
+    const outputPath = join(session.assetsDir, `${newAssetId}.mp4`);
+    const thumbPath = join(session.assetsDir, `${newAssetId}_thumb.jpg`);
+
+    const job = { id: jobId, status: 'processing', progress: 0, etaSeconds: 0, startTime: Date.now(), assetId: newAssetId };
+    jobs.set(jobId, job);
+
+    res.writeHead(202, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+    res.end(JSON.stringify({ jobId }));
+
+    // Start background process
+    (async () => {
+      try {
+        const canCopy = await checkFastConcatCompatibility(session, clips);
+        console.log(`\n[${jobId}] === BACKGROUND MERGE ===`);
+        console.log(`[${jobId}] Optimization: ${canCopy ? 'FAST PATH (-c copy)' : 'RE-ENCODE PATH'}`);
+
+        const args = ['-y'];
+        let totalDuration = 0;
+        let validClipsCount = 0;
+
+        if (canCopy) {
+          // FAST PATH: Concat Demuxer
+          const concatFilePath = join(session.assetsDir, `${jobId}_concat.txt`);
+          let concatContent = '';
+          for (const clip of clips) {
+            const asset = session.assets.get(clip.assetId);
+            if (asset) {
+              concatContent += `file '${asset.path.replace(/'/g, "'\\''")}'\n`;
+              totalDuration += asset.duration;
+              validClipsCount++;
+            }
+          }
+          writeFileSync(concatFilePath, concatContent);
+          args.push('-f', 'concat', '-safe', '0', '-i', concatFilePath, '-c', 'copy', '-progress', 'pipe:1', outputPath);
+        } else {
+          // RE-ENCODE PATH: Filter Complex
+          const filterParts = [];
+          const videoStreams = [];
+          const audioStreams = [];
+          let hasAnyAudio = false;
+          for (let i = 0; i < clips.length; i++) {
+            const clip = clips[i];
+            const asset = session.assets.get(clip.assetId);
+            if (!asset) continue;
+            args.push('-i', asset.path);
+            const inPoint = clip.inPoint || 0;
+            const duration = clip.duration || asset.duration;
+            totalDuration += duration;
+            filterParts.push(`[${validClipsCount}:v]trim=start=${inPoint}:end=${inPoint + duration},setpts=PTS-STARTPTS,scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2[v${validClipsCount}]`);
+            videoStreams.push(`[v${validClipsCount}]`);
+
+            // Only add audio filter if the input actually has an audio stream
+            const inputHasAudio = hasAudioStream(asset.path);
+            if (inputHasAudio) {
+              filterParts.push(`[${validClipsCount}:a]atrim=start=${inPoint}:end=${inPoint + duration},asetpts=PTS-STARTPTS[a${validClipsCount}]`);
+              hasAnyAudio = true;
+            } else {
+              // Generate silent audio for inputs without audio
+              filterParts.push(`anullsrc=r=44100:cl=stereo[silence${validClipsCount}];[silence${validClipsCount}]atrim=duration=${duration}[a${validClipsCount}]`);
+            }
+            audioStreams.push(`[a${validClipsCount}]`);
+            validClipsCount++;
+          }
+          filterParts.push(`${videoStreams.join('')}concat=n=${validClipsCount}:v=1:a=0[outv]`);
+          filterParts.push(`${audioStreams.join('')}concat=n=${validClipsCount}:v=0:a=1[outa]`);
+          args.push('-filter_complex', filterParts.join(';'), '-map', '[outv]', '-map', '[outa]',
+            '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '18', '-c:a', 'aac', '-b:a', '192k',
+            '-progress', 'pipe:1', '-movflags', '+faststart', outputPath);
+        }
+
+        const ffmpeg = spawn('ffmpeg', args);
+
+        // CRITICAL: Drain stderr to prevent pipe buffer from filling up and blocking FFmpeg
+        let stderrOutput = '';
+        ffmpeg.stderr.on('data', (data) => {
+          stderrOutput += data.toString();
+          // Keep only last 4KB of stderr to avoid memory bloat
+          if (stderrOutput.length > 4096) {
+            stderrOutput = stderrOutput.slice(-4096);
+          }
+        });
+
+        ffmpeg.stdout.on('data', (data) => {
+          const str = data.toString();
+          // FFmpeg outputs progress in many formats; out_time_ms/us is common
+          const msMatch = str.match(/out_time_ms=(\d+)/);
+          const usMatch = str.match(/out_time_us=(\d+)/);
+          const timeMatch = str.match(/out_time=(\d{2}:\d{2}:\d{2}.\d{2})/);
+
+          let currentSeconds = -1;
+          if (usMatch) {
+            currentSeconds = parseInt(usMatch[1]) / 1000000;
+          } else if (msMatch) {
+            const val = parseInt(msMatch[1]);
+            // Heuristic: if value > 100000 for a short clip, it's probably microseconds labeled as ms
+            currentSeconds = val > 1000000 ? val / 1000000 : val / 1000;
+          } else if (timeMatch) {
+            const p = timeMatch[1].split(':');
+            currentSeconds = parseInt(p[0]) * 3600 + parseInt(p[1]) * 60 + parseFloat(p[2]);
+          }
+
+          if (currentSeconds >= 0 && totalDuration > 0) {
+            job.progress = Math.min(99, Math.round((currentSeconds / totalDuration) * 100));
+            const elapsed = (Date.now() - job.startTime) / 1000;
+            if (job.progress > 2) {
+              const totalEst = elapsed / (job.progress / 100);
+              job.etaSeconds = Math.max(0, Math.round(totalEst - elapsed));
+            }
+          }
+        });
+
+        await new Promise((resolve, reject) => {
+          ffmpeg.on('close', (code) => {
+            if (code === 0) {
+              resolve();
+            } else {
+              console.error(`[${jobId}] FFmpeg stderr:\n${stderrOutput}`);
+              reject(new Error(`FFmpeg exited with code ${code}`));
+            }
+          });
+          ffmpeg.on('error', reject);
+        });
+
+        await runFFmpeg(['-y', '-i', outputPath, '-ss', '00:00:01.000', '-vframes', '1', '-vf', 'scale=320:-1', '-q:v', '2', thumbPath], jobId + '-thumb');
+        const outputStats = statSync(outputPath);
+        const mergedAsset = {
+          id: newAssetId, type: 'video', filename: `Merged_Sequence_${Date.now()}.mp4`,
+          path: outputPath, thumbPath: existsSync(thumbPath) ? thumbPath : null,
+          duration: totalDuration, size: outputStats.size, width: 1920, height: 1080,
+          createdAt: Date.now(), aiGenerated: true, description: `Merged from ${validClipsCount} clips`
+        };
+        session.assets.set(newAssetId, mergedAsset);
+        saveAssetMetadata(session);
+        job.status = 'completed'; job.progress = 100; job.asset = mergedAsset;
+      } catch (err) {
+        console.error(`[${jobId}] Background merge failed:`, err);
+        job.status = 'failed'; job.error = err.message;
+      }
+    })();
+  } catch (error) {
+    console.error('Merge All setup error:', error);
+    res.writeHead(500, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+    res.end(JSON.stringify({ error: error.message }));
+  }
+}
+
 // Process asset with FFmpeg command (for AI-suggested edits)
 async function handleProcessAsset(req, res, sessionId) {
   const session = getSession(sessionId);
@@ -7512,11 +7733,22 @@ const server = http.createServer(async (req, res) => {
     const sessionId = sessionMatch[1];
     const action = sessionMatch[3] || '';
 
+    // Debug log for routing
+    console.log(`[Server] Routing: session=${sessionId} action='${action}' method=${req.method}`);
+
     if (req.method === 'POST' && sessionId === 'create') {
       await handleSessionCreate(req, res);
     } else if (req.method === 'POST' && sessionId === 'upload') {
       await handleSessionUpload(req, res);
-    } else if (req.method === 'GET' && action === 'stream') {
+    }
+    // Merge all video clips (moved higher to avoid shadowing/404 issues)
+    else if (req.method === 'POST' && action === 'merge-all') {
+      await handleMergeAll(req, res, sessionId);
+    }
+    else if (req.method === 'GET' && action.startsWith('merge-progress/')) {
+      await handleMergeProgress(req, res, sessionId);
+    }
+    else if (req.method === 'GET' && action === 'stream') {
       await handleSessionStream(req, res, sessionId);
     } else if (req.method === 'GET' && action === 'info') {
       await handleSessionInfo(req, res, sessionId);
@@ -7617,6 +7849,7 @@ const server = http.createServer(async (req, res) => {
     else if (req.method === 'POST' && action === 'process-asset') {
       await handleProcessAsset(req, res, sessionId);
     }
+
     // Extract audio from video (creates audio asset + muted video)
     else if (req.method === 'POST' && action === 'extract-audio') {
       await handleExtractAudio(req, res, sessionId);
@@ -7705,5 +7938,6 @@ server.listen(PORT, () => {
   console.log(`   POST /session/:id/analyze-for-animation - Analyze video, return concept for approval`);
   console.log(`   POST /session/:id/generate-contextual-animation - Content-aware animation (transcribes video first)`);
   console.log(`   POST /session/:id/process-asset - Apply FFmpeg command to an asset`);
+  console.log(`   POST /session/:id/merge-all - Merges all clips into one video asset`);
   console.log(`\n   GET /health - Health check\n`);
 });

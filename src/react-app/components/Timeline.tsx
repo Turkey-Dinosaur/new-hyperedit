@@ -1,5 +1,5 @@
 import { useState, useRef, useCallback, useMemo, useEffect } from 'react';
-import { ZoomIn, ZoomOut, Play, Pause, SkipBack, Scissors, Trash2, Type, RectangleHorizontal, RectangleVertical, Link, Unlink } from 'lucide-react';
+import { ZoomIn, ZoomOut, Play, Pause, SkipBack, Scissors, Trash2, Type, RectangleHorizontal, RectangleVertical, Link, Unlink, Undo2, Redo2, Volume2, VolumeX } from 'lucide-react';
 import TimelineClip from './TimelineClip';
 import type { Track, TimelineClip as TimelineClipType, Asset, CaptionData } from '@/react-app/hooks/useProject';
 
@@ -11,7 +11,7 @@ interface TimelineProps {
   currentTime: number;
   duration: number;
   isPlaying: boolean;
-  aspectRatio: '16:9' | '9:16';
+  aspectRatio: '16:9' | '9:16' | 'auto';
   onSelectClip: (id: string | null, modifiers?: { multi: boolean; range: boolean }) => void;
   onSelectClips: (ids: string[], modifiers?: { multi: boolean }) => void;
   onTimeChange: (time: number) => void;
@@ -29,6 +29,12 @@ interface TimelineProps {
   onFinalizeMove: (clipId: string) => void;
   onSave: () => void;
   getCaptionData?: (clipId: string) => CaptionData | null;
+  undo?: () => void;
+  redo?: () => void;
+  canUndo?: boolean;
+  canRedo?: boolean;
+  volume?: number;
+  onVolumeChange?: (volume: number) => void;
 }
 
 const TRACK_HEIGHTS: Record<string, number> = {
@@ -69,12 +75,27 @@ export default function Timeline({
   onFinalizeMove,
   onSave,
   getCaptionData,
+  undo,
+  redo,
+  canUndo = false,
+  canRedo = false,
+  volume = 0.5,
+  onVolumeChange,
 }: TimelineProps) {
   const [zoom, setZoom] = useState(1);
   const [isDraggingPlayhead, setIsDraggingPlayhead] = useState(false);
   const [dragOverTrack, setDragOverTrack] = useState<string | null>(null);
   const [dragOverTime, setDragOverTime] = useState<number | null>(null);
   const [selectionRect, setSelectionRect] = useState<{ x1: number, y1: number, x2: number, y2: number } | null>(null);
+  const [draggedClipInfo, setDraggedClipInfo] = useState<{
+    id: string;
+    originalTrackId: string;
+    originalStart: number;
+    duration: number;
+    currentTrackId: string;
+    currentStart: number;
+    snapTime: number | null;
+  } | null>(null);
 
   const timelineRef = useRef<HTMLDivElement>(null);
   const tracksContainerRef = useRef<HTMLDivElement>(null);
@@ -278,6 +299,12 @@ export default function Timeline({
     let bestSnapDiff = 0.5; // Snap threshold
     let snappedTime = time;
 
+    // Snap to 0 (beginning of timeline)
+    if (time < bestSnapDiff) {
+      snappedTime = 0;
+      bestSnapDiff = time;
+    }
+
     trackClips.forEach(c => {
       const cEnd = c.start + c.duration;
       if (Math.abs(time - cEnd) < bestSnapDiff) {
@@ -378,6 +405,23 @@ export default function Timeline({
           {/* Editing tools */}
           <div className="flex items-center gap-1 border-l border-zinc-700 pl-3 ml-1">
             <button
+              onClick={undo}
+              disabled={!canUndo}
+              className="p-1.5 bg-zinc-700 hover:bg-zinc-600 disabled:opacity-40 disabled:hover:bg-zinc-700 rounded transition-colors"
+              title="Undo"
+            >
+              <Undo2 className="w-3.5 h-3.5" />
+            </button>
+            <button
+              onClick={redo}
+              disabled={!canRedo}
+              className="p-1.5 bg-zinc-700 hover:bg-zinc-600 disabled:opacity-40 disabled:hover:bg-zinc-700 rounded transition-colors"
+              title="Redo"
+            >
+              <Redo2 className="w-3.5 h-3.5" />
+            </button>
+            <div className="w-px h-4 bg-zinc-600 mx-1" />
+            <button
               onClick={onCutAtPlayhead}
               className="p-1.5 bg-zinc-700 hover:bg-zinc-600 rounded transition-colors"
               title="Cut at playhead (split clip)"
@@ -402,12 +446,14 @@ export default function Timeline({
             <button
               onClick={onToggleAspectRatio}
               className="p-1.5 bg-zinc-700 hover:bg-zinc-600 rounded transition-colors"
-              title={`Currently ${aspectRatio === '16:9' ? '16:9 (horizontal)' : '9:16 (vertical)'} - click to switch`}
+              title={`Currently ${aspectRatio === 'auto' ? 'Auto (Best Fit)' : aspectRatio === '16:9' ? '16:9 (Horizontal)' : '9:16 (Vertical)'} - click to override`}
             >
               {aspectRatio === '16:9' ? (
-                <RectangleHorizontal className="w-3.5 h-3.5" />
+                <RectangleHorizontal className="w-3.5 h-3.5 text-orange-400" />
+              ) : aspectRatio === '9:16' ? (
+                <RectangleVertical className="w-3.5 h-3.5 text-orange-400" />
               ) : (
-                <RectangleVertical className="w-3.5 h-3.5" />
+                <RectangleHorizontal className="w-3.5 h-3.5 text-zinc-400" />
               )}
             </button>
             <div className="w-px h-4 bg-zinc-600" />
@@ -425,6 +471,26 @@ export default function Timeline({
                 <Unlink className="w-3.5 h-3.5" />
               )}
             </button>
+
+            <div className="w-px h-4 bg-zinc-600 mx-1" />
+
+            {/* Volume Control */}
+            <div className="flex items-center gap-2 px-2" title="Master Volume">
+              {volume === 0 ? (
+                <VolumeX className="w-3.5 h-3.5 text-zinc-400" />
+              ) : (
+                <Volume2 className="w-3.5 h-3.5 text-zinc-400" />
+              )}
+              <input
+                type="range"
+                min="0"
+                max="1"
+                step="0.01"
+                value={volume}
+                onChange={(e) => onVolumeChange?.(parseFloat(e.target.value))}
+                className="w-16 h-1 bg-zinc-700 rounded-lg appearance-none cursor-pointer accent-orange-500"
+              />
+            </div>
           </div>
 
           {/* Time display */}
@@ -521,6 +587,18 @@ export default function Timeline({
               }}
             />
           )}
+
+          {/* Global Snap Line for clip drag */}
+          {draggedClipInfo?.snapTime !== null && draggedClipInfo?.snapTime !== undefined && (
+            <div
+              className="absolute top-0 bottom-0 w-1 bg-orange-500 z-50 pointer-events-none shadow-[0_0_8px_rgba(249,115,22,0.8)] transition-none"
+              style={{ left: `${draggedClipInfo.snapTime * pixelsPerSecond}px` }}
+            >
+              <div className="absolute -top-4 -translate-x-1/2 bg-orange-600 text-white text-[10px] px-1 rounded whitespace-nowrap">
+                Snap
+              </div>
+            </div>
+          )}
           <div
             className="relative"
             style={{ width: timelineWidth, minHeight: '100%' }}
@@ -610,24 +688,116 @@ export default function Timeline({
                         .map(w => w.text)
                         .join(' ') + (captionData && captionData.words.length > 5 ? '...' : '');
 
+                      // Gap logic: push subsequent clips on the target track to show where the clip will drop
+                      let visualClip = clip;
+                      if (draggedClipInfo && draggedClipInfo.id !== clip.id && track.id === draggedClipInfo.currentTrackId) {
+                        // If this clip starts AT or AFTER the insertion point, push it right by the duration
+                        if (clip.start >= draggedClipInfo.currentStart - 0.01) {
+                          visualClip = { ...clip, start: clip.start + draggedClipInfo.duration };
+                        }
+                      }
+
                       return (
                         <TimelineClip
                           key={clip.id}
-                          clip={clip}
+                          clip={visualClip}
                           asset={getAssetForClip(clip)}
                           pixelsPerSecond={pixelsPerSecond}
                           isSelected={selectedClipIds.includes(clip.id)}
                           trackHeight={TRACK_HEIGHTS[track.type]}
                           onClick={(modifiers) => onSelectClip(clip.id, modifiers)}
-                          onMove={(newStart) => onMoveClip(clip.id, newStart)}
+                          onDragStart={() => {
+                            setDraggedClipInfo({
+                              id: clip.id,
+                              originalTrackId: track.id,
+                              originalStart: clip.start,
+                              duration: clip.duration,
+                              currentTrackId: track.id,
+                              currentStart: clip.start,
+                              snapTime: null
+                            });
+                          }}
+                          onDragProgress={(deltaX, _deltaY, _clientX, clientY) => {
+                            setDraggedClipInfo(prev => {
+                              if (!prev) return null;
+
+                              let newStart = Math.max(0, prev.originalStart + (deltaX / pixelsPerSecond));
+
+                              // Calculate target track using DOM
+                              let targetTrackId = prev.currentTrackId;
+                              if (tracksContainerRef.current) {
+                                const rect = tracksContainerRef.current.getBoundingClientRect();
+                                const scrollTop = tracksContainerRef.current.scrollTop;
+                                // 24px is the sticky time ruler height
+                                const yRelative = clientY - rect.top + scrollTop - 24;
+
+                                let accumulatedHeight = 0;
+                                for (const t of sortedTracks) {
+                                  const h = TRACK_HEIGHTS[t.type];
+                                  if (yRelative >= accumulatedHeight && yRelative <= accumulatedHeight + h) {
+                                    targetTrackId = t.id;
+                                    break;
+                                  }
+                                  accumulatedHeight += h;
+                                }
+                              }
+
+                              // Calculate global snap
+                              let bestSnapTime: number | null = null;
+                              if (autoSnap) {
+                                let bestDiff = 0.5; // Snap threshold
+                                const clipEnd = newStart + prev.duration;
+
+                                clips.forEach(c => {
+                                  if (c.id === prev.id) return;
+
+                                  // Check start edge
+                                  if (Math.abs(newStart - c.start) < bestDiff) {
+                                    bestSnapTime = c.start;
+                                    newStart = c.start;
+                                    bestDiff = Math.abs(newStart - c.start);
+                                  } else if (Math.abs(clipEnd - c.start) < bestDiff) {
+                                    bestSnapTime = c.start;
+                                    newStart = c.start - prev.duration;
+                                    bestDiff = Math.abs(clipEnd - c.start);
+                                  }
+
+                                  // Check end edge
+                                  const cEnd = c.start + c.duration;
+                                  if (Math.abs(newStart - cEnd) < bestDiff) {
+                                    bestSnapTime = cEnd;
+                                    newStart = cEnd;
+                                    bestDiff = Math.abs(newStart - cEnd);
+                                  } else if (Math.abs(clipEnd - cEnd) < bestDiff) {
+                                    bestSnapTime = cEnd;
+                                    newStart = cEnd - prev.duration;
+                                    bestDiff = Math.abs(clipEnd - cEnd);
+                                  }
+                                });
+                              }
+
+                              return {
+                                ...prev,
+                                currentStart: newStart,
+                                currentTrackId: targetTrackId,
+                                snapTime: bestSnapTime
+                              };
+                            });
+                          }}
+                          onDragEnd={() => {
+                            setDraggedClipInfo(prev => {
+                              if (prev) {
+                                onMoveClip(prev.id, prev.currentStart, prev.currentTrackId);
+                                onFinalizeMove(prev.id);
+                                onSave();
+                              }
+                              return null;
+                            });
+                          }}
                           onResize={(inPoint, outPoint, newStart) =>
                             onResizeClip(clip.id, inPoint, outPoint, newStart)
                           }
                           onDelete={() => onDeleteClip(clip.id)}
-                          onDragEnd={() => {
-                            onFinalizeMove(clip.id);
-                            onSave();
-                          }}
                           isCaption={isCaption}
                           captionPreview={captionPreview}
                         />

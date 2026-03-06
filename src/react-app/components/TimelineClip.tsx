@@ -9,9 +9,10 @@ interface TimelineClipProps {
   isSelected: boolean;
   trackHeight: number;
   onClick: (modifiers: { multi: boolean; range: boolean }) => void;
-  onMove: (newStart: number) => void;
-  onResize: (newInPoint: number, newOutPoint: number, newStart?: number) => void;
+  onDragStart?: () => void;
+  onDragProgress?: (deltaX: number, deltaY: number, clientX: number, clientY: number) => void;
   onDragEnd: () => void;
+  onResize: (newInPoint: number, newOutPoint: number, newStart?: number) => void;
   onDelete: () => void;
   captionPreview?: string;  // For caption clips - first few words
   isCaption?: boolean;       // Whether this is a caption clip
@@ -44,9 +45,10 @@ export default function TimelineClip({
   isSelected,
   trackHeight,
   onClick,
-  onMove,
-  onResize,
+  onDragStart,
+  onDragProgress,
   onDragEnd,
+  onResize,
   onDelete,
   captionPreview,
   isCaption = false,
@@ -55,6 +57,9 @@ export default function TimelineClip({
   const [isResizingLeft, setIsResizingLeft] = useState(false);
   const [isResizingRight, setIsResizingRight] = useState(false);
   const [dragStartX, setDragStartX] = useState(0);
+  const [dragStartY, setDragStartY] = useState(0);
+  const [dragX, setDragX] = useState(0);
+  const [dragY, setDragY] = useState(0);
   const [initialStart, setInitialStart] = useState(0);
   const [initialInPoint, setInitialInPoint] = useState(0);
   const [initialOutPoint, setInitialOutPoint] = useState(0);
@@ -93,12 +98,16 @@ export default function TimelineClip({
       // Main body - dragging
       setIsDragging(true);
       setDragStartX(e.clientX);
+      setDragStartY(e.clientY);
+      setDragX(0);
+      setDragY(0);
       setInitialStart(clip.start);
+      onDragStart?.();
     }
 
     e.preventDefault();
     e.stopPropagation();
-  }, [clip.inPoint, clip.outPoint, clip.start]);
+  }, [clip.inPoint, clip.outPoint, clip.start, onDragStart]);
 
   // Handle mouse move for dragging/resizing
   useEffect(() => {
@@ -109,8 +118,10 @@ export default function TimelineClip({
       const deltaTime = deltaX / pixelsPerSecond;
 
       if (isDragging) {
-        const newStart = Math.max(0, initialStart + deltaTime);
-        onMove(newStart);
+        const deltaY = e.clientY - dragStartY;
+        setDragX(deltaX);
+        setDragY(deltaY);
+        onDragProgress?.(deltaX, deltaY, e.clientX, e.clientY);
       } else if (isResizingLeft) {
         // Resize from left - changes inPoint and start
         const newInPoint = Math.max(0, initialInPoint + deltaTime);
@@ -133,6 +144,8 @@ export default function TimelineClip({
       setIsDragging(false);
       setIsResizingLeft(false);
       setIsResizingRight(false);
+      setDragX(0);
+      setDragY(0);
       onDragEnd();
     };
 
@@ -148,6 +161,7 @@ export default function TimelineClip({
     isResizingLeft,
     isResizingRight,
     dragStartX,
+    dragStartY,
     initialStart,
     initialInPoint,
     initialOutPoint,
@@ -155,7 +169,7 @@ export default function TimelineClip({
     clip.inPoint,
     clip.outPoint,
     asset?.duration,
-    onMove,
+    onDragProgress,
     onResize,
     onDragEnd,
   ]);
@@ -169,18 +183,21 @@ export default function TimelineClip({
       }}
       onMouseDown={handleMouseDown}
       className={`absolute rounded-md bg-gradient-to-r ${colorClass} ${isDragging
-          ? 'opacity-80 scale-105 shadow-xl shadow-black/50 z-30 cursor-grabbing ring-2 ring-orange-400'
-          : isResizingLeft || isResizingRight
-            ? 'cursor-ew-resize z-20 ring-2 ring-orange-400'
-            : isSelected
-              ? 'ring-2 ring-orange-400 shadow-lg shadow-orange-500/30 z-20 cursor-grab'
-              : 'ring-1 ring-orange-500/50 hover:ring-orange-400 z-10 cursor-grab'
-        } transition-all duration-75`}
+        ? 'opacity-90 shadow-2xl shadow-black/80 z-50 cursor-grabbing ring-2 ring-orange-400'
+        : isResizingLeft || isResizingRight
+          ? 'cursor-ew-resize z-20 ring-2 ring-orange-400'
+          : isSelected
+            ? 'ring-2 ring-orange-400 shadow-lg shadow-orange-500/30 z-20 cursor-grab'
+            : 'ring-1 ring-orange-500/50 hover:ring-orange-400 z-10 cursor-grab'
+        } transition-colors duration-75`}
       style={{
         left: `${left}px`,
         width: `${width}px`,
         top: '4px',
         height: `${trackHeight - 8}px`,
+        transform: isDragging ? `translate(${dragX}px, ${dragY}px) rotate(-2deg) scale(1.05)` : 'none',
+        transformOrigin: 'center center',
+        transition: isDragging ? 'none' : 'transform 0.1s ease-out',
       }}
     >
       {/* Left edge indicator - prominent orange line showing cut point */}

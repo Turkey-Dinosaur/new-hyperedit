@@ -32,8 +32,9 @@ export default function Home() {
   const [showChapters, setShowChapters] = useState(false);
   const [copied, setCopied] = useState(false);
   const [previewAssetId, setPreviewAssetId] = useState<string | null>(null);
-  const [aspectRatio, setAspectRatio] = useState<'16:9' | '9:16'>('16:9');
+  const [aspectRatio, setAspectRatio] = useState<'16:9' | '9:16' | 'auto'>('auto');
   const [autoSnap, setAutoSnap] = useState(true); // Ripple delete mode - shift clips when deleting
+  const [masterVolume, setMasterVolume] = useState(0.5);
   const [activeAgent, setActiveAgent] = useState<'director' | 'picasso' | 'dicaprio'>('director');
   const [showGifSearch, setShowGifSearch] = useState(false);
 
@@ -79,6 +80,11 @@ export default function Home() {
     // Settings
     setSettings,
     setClips,
+    // Undo / Redo
+    undo,
+    redo,
+    canUndo,
+    canRedo,
   } = useProject();
 
   // Compute the active clips based on which tab is selected
@@ -103,10 +109,13 @@ export default function Home() {
     checkServer();
   }, [checkServer]);
 
+  const sessionLoadedRef = useRef<string | null>(null);
+
   // Load project from server when session becomes available
   useEffect(() => {
-    if (session) {
+    if (session && sessionLoadedRef.current !== session.sessionId) {
       console.log('Session available, loading project...');
+      sessionLoadedRef.current = session.sessionId;
       loadProject();
     }
   }, [session, loadProject]);
@@ -139,6 +148,8 @@ export default function Home() {
       trackId: string;
       clipTime: number;
       clipStart: number;
+      width?: number;
+      height?: number;
       transform?: TimelineClip['transform'];
       captionWords?: Array<{ text: string; start: number; end: number }>;
       captionStyle?: CaptionStyle;
@@ -168,6 +179,8 @@ export default function Home() {
             trackId: clip.trackId,
             clipTime,
             clipStart: clip.start,
+            width: asset.width,
+            height: asset.height,
             transform: clip.transform,
           });
         }
@@ -399,7 +412,9 @@ export default function Home() {
 
   // Handle dropping multiple assets onto timeline
   const handleDropAssets = useCallback((droppedAssets: Asset[], trackId: string, time: number) => {
-    let currentTimeOffset = time;
+    // If track is empty and drop is near the start, snap to 0
+    const trackHasClips = clips.some(c => c.trackId === trackId);
+    let currentTimeOffset = (!trackHasClips && time < 0.5) ? 0 : time;
 
     droppedAssets.forEach(asset => {
       // Determine which track to use based on asset type
@@ -448,7 +463,7 @@ export default function Home() {
     // After state flushes (next render), we could finalize collisions, but addClip appends to end of state blindly.
     // finalizeClipMove works on existing clips. We should call it for the first dropped clip ideally.
     // But since handleDropAssets is simple, we rely on the magnetic snapping that happened during drag in Timeline.tsx.
-  }, [addClip, saveProject, activeTabId, timelineTabs, updateTabClips]);
+  }, [addClip, clips, saveProject, activeTabId, timelineTabs, updateTabClips]);
 
   // Handle finalize move
   const handleFinalizeMove = useCallback((clipId: string) => {
@@ -565,15 +580,23 @@ export default function Home() {
     console.log('Add text overlay at', currentTime);
   }, [currentTime]);
 
-  // Handle toggling aspect ratio
+  // Toggle aspect ratio between auto, 16:9 and 9:16
   const handleToggleAspectRatio = useCallback(() => {
     setAspectRatio(prev => {
-      const newRatio = prev === '16:9' ? '9:16' : '16:9';
-      // Update project settings with new dimensions
-      if (newRatio === '9:16') {
-        setSettings(s => ({ ...s, width: 1080, height: 1920 }));
-      } else {
+      let newRatio: '16:9' | '9:16' | 'auto';
+      if (prev === 'auto') {
+        newRatio = '16:9';
         setSettings(s => ({ ...s, width: 1920, height: 1080 }));
+      } else if (prev === '16:9') {
+        newRatio = '9:16';
+        setSettings(s => ({ ...s, width: 1080, height: 1920 }));
+      } else { // prev === '9:16'
+        newRatio = 'auto';
+        // When 'auto', we might want to reset to default project settings or clear them
+        // For now, we'll just let the VideoPreview component handle 'auto'
+        // and not explicitly set width/height in project settings.
+        // If there's a default project setting, it would be applied on load.
+        setSettings(s => ({ ...s, width: undefined, height: undefined })); // Clear explicit dimensions
       }
       return newRatio;
     });
@@ -939,6 +962,7 @@ export default function Home() {
     const response = await fetch(`http://localhost:3333/session/${session.sessionId}/generate-broll`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({}),
     });
 
     if (!response.ok) {
@@ -1681,6 +1705,108 @@ export default function Home() {
     await saveProject();
   }, [clips, assets, setClips, saveProject, activeTabId, timelineTabs, updateTabClips]);
 
+  // Handle merging all timeline clips into a single asset
+  // Handle merging all timeline clips into a single asset
+  const handleMergeAll = useCallback(async (onProgress?: (status: string) => void) => {
+    if (!session?.sessionId) {
+      throw new Error('Please upload a video first to start a session');
+    }
+
+    // Work on the current active sequence (main or edit tab)
+    const currentClips = activeTabId === 'main' ? clips : (timelineTabs.find(t => t.id === activeTabId)?.clips || []);
+    if (currentClips.length === 0) {
+      throw new Error('No clips on the timeline to merge');
+    }
+
+    // Filter for video assets only, regardless of track
+    // We sort by start time to preserve the visual order of the timeline
+    // The backend will join them head-to-tail (ignoring gaps)
+    const sortedClips = [...currentClips]
+      .filter(c => {
+        const asset = assets.find(a => a.id === c.assetId);
+        return asset?.type === 'video';
+      })
+      .sort((a, b) => a.start - b.start);
+
+    if (sortedClips.length === 0) {
+      throw new Error('No video clips found to merge');
+    }
+
+    // Map clips to technical data for backend
+    const mergeData = sortedClips.map(clip => ({
+      assetId: clip.assetId,
+      inPoint: clip.inPoint || 0,
+      duration: clip.duration,
+    }));
+
+    if (onProgress) onProgress('Starting merge...');
+
+    const response = await fetch(`http://localhost:3333/session/${session.sessionId}/merge-all`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ clips: mergeData }),
+    });
+
+    if (!response.ok) {
+      const error = await response.json();
+      throw new Error(error.error || 'Failed to start merge');
+    }
+
+    const { jobId } = await response.json();
+
+    // Polling loop
+    return new Promise<void>((resolve, reject) => {
+      const pollInterval = setInterval(async () => {
+        try {
+          const res = await fetch(`http://localhost:3333/session/${session.sessionId}/merge-progress/${jobId}`);
+          if (!res.ok) throw new Error('Failed to fetch job progress');
+
+          const job = await res.json();
+
+          if (job.status === 'completed') {
+            clearInterval(pollInterval);
+
+            // Refresh assets to get the new merged asset
+            await refreshAssets();
+
+            // Create the new merged clip
+            const mergedClip: TimelineClip = {
+              id: crypto.randomUUID(),
+              assetId: job.asset.id,
+              trackId: 'V1',
+              start: 0,
+              duration: job.asset.duration,
+              inPoint: 0,
+              outPoint: job.asset.duration,
+            };
+
+            // Replace all clips on the current timeline with this single one
+            if (activeTabId === 'main') {
+              setClips([mergedClip]);
+              setSelectedClipIds([mergedClip.id]);
+            } else {
+              updateTabClips(activeTabId, [mergedClip]);
+            }
+
+            await saveProject();
+            setCurrentTime(0);
+            resolve();
+          } else if (job.status === 'failed') {
+            clearInterval(pollInterval);
+            reject(new Error(job.error || 'Merge failed during background processing'));
+          } else if (onProgress) {
+            // Update UI status with progress and ETA
+            const etaText = job.etaSeconds ? ` (Estimated ${Math.round(job.etaSeconds / 60)}m remaining)` : '';
+            onProgress(`Merging clips together... ${job.progress}%${etaText}`);
+          }
+        } catch (err) {
+          clearInterval(pollInterval);
+          reject(err);
+        }
+      }, 1000);
+    });
+  }, [session, clips, assets, activeTabId, timelineTabs, refreshAssets, setClips, saveProject, updateTabClips]);
+
   // Handle contextual animation creation (uses video content to inform the animation)
   const handleCreateContextualAnimation = useCallback(async (request: {
     type: 'intro' | 'outro' | 'transition' | 'highlight';
@@ -2066,6 +2192,7 @@ export default function Home() {
                 layers={previewLayers}
                 isPlaying={isPlaying && !previewAssetId}
                 aspectRatio={aspectRatio}
+                volume={masterVolume}
                 onLayerMove={handleLayerMove}
                 onLayerSelect={handleLayerSelect}
                 selectedLayerId={selectedClip?.id || null}
@@ -2121,6 +2248,12 @@ export default function Home() {
               onFinalizeMove={handleFinalizeMove}
               onSave={saveProject}
               getCaptionData={getCaptionData}
+              undo={undo}
+              redo={redo}
+              canUndo={canUndo}
+              canRedo={canRedo}
+              volume={masterVolume}
+              onVolumeChange={setMasterVolume}
             />
           </ResizableVerticalPanel>
         </div>
@@ -2186,6 +2319,7 @@ export default function Home() {
                   onGenerateBatchAnimations={handleGenerateBatchAnimations}
                   onExtractAudio={handleExtractAudio}
                   onAutoOrder={handleAutoOrder}
+                  onMergeAll={handleMergeAll}
                   onCreateContextualAnimation={handleCreateContextualAnimation}
                   onOpenAnimationInTab={handleOpenAnimationInTab}
                   onEditAnimation={handleEditAnimation}

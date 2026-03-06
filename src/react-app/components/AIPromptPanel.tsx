@@ -180,6 +180,7 @@ interface AIPromptPanelProps {
   onGenerateBatchAnimations?: (count: number) => Promise<{ animations: BatchAnimationResult[]; videoDuration: number }>;
   onExtractAudio?: () => Promise<ExtractAudioResult>;
   onAutoOrder?: () => Promise<void>;
+  onMergeAll?: (onProgress?: (status: string) => void) => Promise<void>;
   onOpenAnimationInTab?: (assetId: string, animationName: string) => string | undefined;
   onEditAnimation?: (assetId: string, editPrompt: string, v1Context?: EditTabV1Context, tabIdToUpdate?: string) => Promise<{ assetId: string; duration: number; sceneCount: number }>;
   isApplying?: boolean;
@@ -215,6 +216,7 @@ export default function AIPromptPanel({
   onGenerateBatchAnimations,
   onExtractAudio,
   onAutoOrder,
+  onMergeAll,
   onOpenAnimationInTab,
   onEditAnimation,
   isApplying,
@@ -555,6 +557,7 @@ export default function AIPromptPanel({
     { icon: Move, text: 'Add Ken Burns zoom effect' },
     { icon: Music, text: 'Extract audio to A1' },
     { icon: ListOrdered, text: 'Auto-order clips' },
+    { icon: Film, text: 'Merge all clips' },
   ];
 
   // Check if prompt is asking for a contextual animation (intro/outro that needs video context)
@@ -894,6 +897,7 @@ export default function AIPromptPanel({
     | 'contextual-animation' // Animation based on video content
     | 'extract-audio'       // Extract audio to separate track
     | 'auto-order'          // Chronological reorder
+    | 'merge-all'           // Merge all clips into one
     | 'ffmpeg-edit'         // Direct FFmpeg video manipulation
     | 'unknown';            // Need to ask for clarification
 
@@ -1092,6 +1096,13 @@ export default function AIPromptPanel({
     if (lower.includes('auto order') || lower.includes('auto-order') || lower.includes('reorder') ||
       lower.includes('sort clips') || lower.includes('chronological')) {
       return 'auto-order';
+    }
+
+    // Merge all clips
+    if (lower.includes('merge all') || lower.includes('combine all') ||
+      lower.includes('stitch all') || lower.includes('concatenate all') ||
+      (lower.includes('merge') && lower.includes('one clip'))) {
+      return 'merge-all';
     }
 
     // FFmpeg-style video edits (trim, cut, speed, etc.)
@@ -1940,6 +1951,45 @@ export default function AIPromptPanel({
     }
   };
 
+  const handleMergeAllWorkflow = async () => {
+    if (!onMergeAll) return;
+
+    setIsProcessing(true);
+    setProcessingStatus('Merging clips together...');
+
+    setChatHistory(prev => [...prev, {
+      type: 'assistant',
+      text: '🎬 I\'ll merge all your timeline clips into a single video asset. This will preserve their current order but bake them into a one file for easier export or further editing.',
+      isProcessingGifs: true,
+    }]);
+
+    try {
+      await onMergeAll(setProcessingStatus);
+      setChatHistory(prev => {
+        const updated = [...prev];
+        const lastIdx = updated.length - 1;
+        if (updated[lastIdx]?.isProcessingGifs) {
+          updated[lastIdx] = {
+            ...updated[lastIdx],
+            text: '✅ All clips have been merged into a single asset! Your original clips have been replaced with the new merged sequence.',
+            isProcessingGifs: false,
+            applied: true,
+          };
+        }
+        return updated;
+      });
+    } catch (error) {
+      console.error('Merge all failed:', error);
+      setChatHistory(prev => [...prev, {
+        type: 'assistant',
+        text: `❌ Failed to merge clips: ${error instanceof Error ? error.message : 'Unknown error'}`,
+      }]);
+    } finally {
+      setIsProcessing(false);
+      setProcessingStatus('');
+    }
+  };
+
   const handleExtractAudioWorkflow = async () => {
     if (!onExtractAudio) return;
 
@@ -2188,6 +2238,12 @@ export default function AIPromptPanel({
       return;
     }
 
+    // Merge all clips
+    if (workflow === 'merge-all') {
+      await handleMergeAllWorkflow();
+      return;
+    }
+
     // Transcript animation (kinetic typography)
     if (workflow === 'transcript-animation') {
       if (!hasVideo) {
@@ -2378,13 +2434,13 @@ export default function AIPromptPanel({
       )}
 
       {/* Processing overlay */}
-      {isApplying && (
+      {(isApplying || isProcessing) && (
         <div className="p-4 bg-orange-500/10 border-b border-orange-500/20">
           <div className="flex items-center gap-3">
             <Loader2 className="w-5 h-5 text-orange-400 animate-spin" />
             <div className="flex-1">
               <p className="text-sm text-orange-200 font-medium">
-                {applyStatus || 'Processing video...'}
+                {processingStatus || applyStatus || 'Processing video...'}
               </p>
               {(applyProgress ?? 0) > 0 && (
                 <>

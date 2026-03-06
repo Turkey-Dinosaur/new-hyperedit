@@ -21,6 +21,8 @@ interface ClipLayer {
   type: 'video' | 'image' | 'audio' | 'caption';
   trackId: string;
   clipTime: number;
+  width?: number;
+  height?: number;
   transform?: ClipTransform;
   // Caption-specific data
   captionWords?: CaptionWord[];
@@ -30,7 +32,8 @@ interface ClipLayer {
 interface VideoPreviewProps {
   layers?: ClipLayer[];
   isPlaying?: boolean;
-  aspectRatio?: '16:9' | '9:16';
+  aspectRatio?: '16:9' | '9:16' | 'auto';
+  volume?: number;
   onLayerMove?: (layerId: string, x: number, y: number) => void;
   onLayerSelect?: (layerId: string) => void;
   selectedLayerId?: string | null;
@@ -83,7 +86,8 @@ function getTransformStyles(transform?: ClipTransform, zIndex: number = 0, isDra
 const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(({
   layers = [],
   isPlaying = false,
-  aspectRatio = '16:9',
+  aspectRatio = 'auto',
+  volume = 0.5,
   onLayerMove,
   onLayerSelect,
   selectedLayerId,
@@ -104,7 +108,7 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(({
   // Memoize to prevent effect triggers when only caption layers change
   const baseVideoLayer = useMemo(() => {
     return foundBaseLayer;
-  // eslint-disable-next-line react-hooks/exhaustive-deps
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [baseLayerId, baseLayerUrl]);
 
   // Get all layers sorted by track for rendering (V1 at bottom, then V2/V3, then T1 captions on top)
@@ -143,6 +147,14 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(({
     }
   }, [baseLayerUrl]);
 
+  // Master Volume control for base video
+  useEffect(() => {
+    const video = videoRef.current;
+    if (video) {
+      video.volume = volume;
+    }
+  }, [volume]);
+
   // Seek control for base video (only when paused/scrubbing)
   useEffect(() => {
     const video = videoRef.current;
@@ -169,16 +181,17 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(({
     }
   }, [isPlaying]);
 
-  // Play/pause control for overlay videos (V2, V3, etc.)
+  // Play/pause and Volume control for overlay videos (V2, V3, etc.)
   useEffect(() => {
     overlayVideoRefs.current.forEach((video) => {
+      video.volume = volume;
       if (isPlaying) {
-        video.play().catch(() => {});
+        video.play().catch(() => { });
       } else {
         video.pause();
       }
     });
-  }, [isPlaying]);
+  }, [isPlaying, volume]);
 
   // Sync overlay video and audio seeking when scrubbing
   useEffect(() => {
@@ -256,18 +269,36 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(({
   }, [draggingLayer, dragStart, onLayerMove]);
 
   // Aspect ratio styles
-  const isVertical = aspectRatio === '9:16';
   // Use object-contain to show full video without cropping
   const videoFitClass = 'object-contain';
 
-  // Container classes based on aspect ratio
-  const containerClass = isVertical
-    ? 'h-[65vh] w-auto aspect-[9/16]'  // Vertical: fixed height, width from aspect ratio
-    : 'w-full max-w-4xl aspect-video';  // Horizontal: constrain width, height follows
+  // Determine dynamic aspect ratio from base video layer
+  const dynamicRatioString = (foundBaseLayer?.width && foundBaseLayer?.height)
+    ? `${foundBaseLayer.width}/${foundBaseLayer.height}`
+    : undefined;
+
+  const isVertical = aspectRatio === '9:16';
+
+  // Container styling
+  const containerStyle: React.CSSProperties = {};
+  let containerClass = 'relative bg-black rounded-xl overflow-hidden shadow-2xl ring-1 ring-white/10 ';
+
+  if (aspectRatio === 'auto') {
+    containerClass += 'w-full max-w-4xl ';
+    if (dynamicRatioString) {
+      containerStyle.aspectRatio = dynamicRatioString;
+    } else {
+      containerClass += 'aspect-video'; // fallback
+    }
+  } else if (isVertical) {
+    containerClass += 'h-[65vh] w-auto aspect-[9/16]';
+  } else {
+    containerClass += 'w-full max-w-4xl aspect-video';
+  }
 
   if (layers.length === 0) {
     return (
-      <div className={`relative ${containerClass} bg-black rounded-xl overflow-hidden shadow-2xl ring-1 ring-white/10 flex items-center justify-center`}>
+      <div className={`${containerClass} flex items-center justify-center`} style={containerStyle}>
         <div className="text-center text-zinc-600">
           <Play className="w-12 h-12 mx-auto mb-2 opacity-50" />
           <p className="text-sm">No media to display</p>
@@ -285,7 +316,8 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(({
   return (
     <div
       ref={containerRef}
-      className={`relative ${containerClass} bg-black rounded-xl overflow-hidden shadow-2xl ring-1 ring-white/10`}
+      className={containerClass}
+      style={containerStyle}
     >
       {/* Base video layer (V1) - rendered separately for stability */}
       {foundBaseLayer && (
@@ -320,13 +352,11 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(({
                 }
               }}
               src={layer.url}
-              className={`absolute inset-0 w-full h-full ${videoFitClass} cursor-grab active:cursor-grabbing ${
-                isSelected ? 'ring-2 ring-orange-500 ring-offset-2 ring-offset-black' : ''
-              }`}
+              className={`absolute inset-0 w-full h-full ${videoFitClass} cursor-grab active:cursor-grabbing ${isSelected ? 'ring-2 ring-orange-500 ring-offset-2 ring-offset-black' : ''
+                }`}
               style={styles}
               playsInline
               preload="auto"
-              muted
               onLoadedData={(e) => {
                 // Seek to correct time when loaded
                 const video = e.currentTarget;
@@ -335,7 +365,7 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(({
                 }
                 // Auto-play if timeline is playing
                 if (isPlaying) {
-                  video.play().catch(() => {});
+                  video.play().catch(() => { });
                 }
               }}
               onMouseDown={(e) => handleLayerMouseDown(e, layer)}
@@ -433,7 +463,7 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(({
                   audio.currentTime = layer.clipTime;
                 }
                 if (isPlaying) {
-                  audio.play().catch(() => {});
+                  audio.play().catch(() => { });
                 }
               }}
               style={{ display: 'none' }}
