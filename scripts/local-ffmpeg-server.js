@@ -392,9 +392,9 @@ async function detectSilence(inputPath, jobId, options = {}) {
 // Get video/audio duration (returns 0 for images)
 async function getVideoDuration(inputPath) {
   try {
-    const result = execSync(
-      `ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "${inputPath}"`,
-      { encoding: 'utf-8' }
+    const result = await runFFmpegProbe(
+      ['-v', 'error', '-show_entries', 'format=duration', '-of', 'default=noprint_wrappers=1:nokey=1', inputPath],
+      'duration'
     );
     const duration = parseFloat(result.trim());
     return isNaN(duration) ? 0 : duration;
@@ -813,7 +813,7 @@ async function handleGenerateChapters(req, res) {
     const ai = new GoogleGenAI({ apiKey });
 
     const response = await ai.models.generateContent({
-      model: 'gemini-2.0-flash',
+      model: 'gemini-2.5-flash',
       contents: [
         {
           role: 'user',
@@ -1375,7 +1375,7 @@ async function handleSessionChapters(req, res, sessionId) {
 
     const ai = new GoogleGenAI({ apiKey });
     const response = await ai.models.generateContent({
-      model: 'gemini-2.0-flash',
+      model: 'gemini-2.5-flash',
       contents: [{
         role: 'user',
         parts: [
@@ -1535,21 +1535,25 @@ async function generateThumbnail(inputPath, outputPath, isImage = false) {
   }
 }
 
-// Get video/image dimensions
+// Get video/image dimensions and duration
 async function getMediaInfo(inputPath) {
   try {
-    const result = execSync(
-      `ffprobe -v error -select_streams v:0 -show_entries stream=width,height,duration -of json "${inputPath}"`,
-      { encoding: 'utf-8' }
+    const result = await runFFmpegProbe(
+      ['-v', 'error', '-select_streams', 'v:0', '-show_entries', 'stream=width,height', '-show_entries', 'format=duration', '-of', 'json', inputPath],
+      'media-info'
     );
+    console.log('[media-info] ffprobe raw output:', result);
     const info = JSON.parse(result);
     const stream = info.streams?.[0] || {};
+    const duration = parseFloat(info.format?.duration) || 0;
+    console.log(`[media-info] Parsed: width=${stream.width}, height=${stream.height}, duration=${duration}`);
     return {
       width: stream.width || 0,
       height: stream.height || 0,
-      duration: parseFloat(stream.duration) || 0,
+      duration,
     };
-  } catch {
+  } catch (e) {
+    console.error('[media-info] ffprobe FAILED:', e.message);
     return { width: 0, height: 0, duration: 0 };
   }
 }
@@ -2772,7 +2776,7 @@ async function getOrTranscribeVideo(session, videoAsset, jobId) {
     const audioBase64 = audioBuffer.toString('base64');
 
     const result = await ai.models.generateContent({
-      model: 'gemini-2.0-flash',
+      model: 'gemini-2.5-flash',
       contents: [{
         role: 'user',
         parts: [
@@ -3043,7 +3047,7 @@ async function handleTranscribe(req, res, sessionId) {
         const audioBase64 = audioBuffer.toString('base64');
         const ai = new GoogleGenAI({ apiKey: geminiKey });
 
-        const model = ai.getGenerativeModel({ model: 'gemini-2.0-flash' });
+        const model = ai.getGenerativeModel({ model: 'gemini-2.5-flash' });
         const result = await model.generateContent([
           { inlineData: { mimeType: 'audio/mp3', data: audioBase64 } },
           { text: `Transcribe this audio with word-level timestamps. Duration: ${totalDuration.toFixed(1)}s. Return JSON: {"text": "full text", "words": [{"text": "word", "start": 0.0, "end": 0.5}]}` }
@@ -3203,7 +3207,7 @@ async function analyzeBrollOpportunities(transcript, words, totalDuration, apiKe
   const ai = new GoogleGenAI({ apiKey });
 
   const response = await ai.models.generateContent({
-    model: 'gemini-2.0-flash',
+    model: 'gemini-2.5-flash',
     contents: [{
       role: 'user',
       parts: [{
@@ -3388,7 +3392,7 @@ async function handleGenerateBroll(req, res, sessionId) {
         const audioBase64 = audioBuffer.toString('base64');
         const ai = new GoogleGenAI({ apiKey });
         const response = await ai.models.generateContent({
-          model: 'gemini-2.0-flash',
+          model: 'gemini-2.5-flash',
           contents: [{
             role: 'user', parts: [
               { inlineData: { mimeType: 'audio/mp3', data: audioBase64 } },
@@ -3443,7 +3447,7 @@ async function handleGenerateBroll(req, res, sessionId) {
 
       const ai = new GoogleGenAI({ apiKey });
       const response = await ai.models.generateContent({
-        model: 'gemini-2.0-flash',
+        model: 'gemini-2.5-flash',
         contents: [{
           role: 'user',
           parts: [
@@ -3732,7 +3736,7 @@ async function handleGenerateAnimation(req, res, sessionId) {
 
               const ai = new GoogleGenAI({ apiKey });
               const segmentResult = await ai.models.generateContent({
-                model: 'gemini-2.0-flash',
+                model: 'gemini-2.5-flash',
                 contents: [{
                   role: 'user',
                   parts: [{
@@ -4042,7 +4046,7 @@ ${attachedAssetIds?.length ? `- IMPORTANT: Include media scenes to showcase the 
 - For videos, consider using slow-mo (videoPlaybackRate: 0.5) for dramatic moments` : ''}`;
 
     const result = await ai.models.generateContent({
-      model: 'gemini-2.0-flash',
+      model: 'gemini-2.5-flash',
       contents: [{ role: 'user', parts: [{ text: prompt }] }],
     });
 
@@ -4861,7 +4865,7 @@ User: "a peaceful forest"
 Enhanced: "Ancient moss-covered forest with towering redwood trees, ethereal morning mist weaving between massive trunks, soft dappled sunlight filtering through the dense canopy, ferns and wildflowers carpeting the forest floor, a gentle stream with crystal-clear water, mystical and serene atmosphere, nature photography style, rich greens and earth tones, depth and scale, photorealistic, National Geographic quality"`;
 
         const result = await ai.models.generateContent({
-          model: 'gemini-2.0-flash',
+          model: 'gemini-2.5-flash',
           contents: [{
             role: 'user',
             parts: [{ text: `Enhance this image prompt:\n\n"${prompt}"` }]
@@ -5067,7 +5071,7 @@ Input: "zoom out"
 Output: "Epic reveal shot with slow cinematic zoom out, camera gently pulling back to reveal the full scene, subtle atmospheric haze and soft light flares, smooth dolly movement with slight vertical lift"`;
 
         const result = await ai.models.generateContent({
-          model: 'gemini-2.0-flash',
+          model: 'gemini-2.5-flash',
           contents: [
             { role: 'user', parts: [{ text: systemPrompt }] },
             { role: 'user', parts: [{ text: `Enhance this video motion prompt: "${prompt}"` }] }
@@ -5272,7 +5276,7 @@ async function handleRestyleVideo(req, res, sessionId) {
         const ai = new GoogleGenAI({ apiKey: geminiApiKey });
 
         const result = await ai.models.generateContent({
-          model: 'gemini-2.0-flash',
+          model: 'gemini-2.5-flash',
           contents: [{
             role: 'user',
             parts: [{
@@ -5684,7 +5688,7 @@ async function handleGenerateBatchAnimations(req, res, sessionId) {
 
     const ai = new GoogleGenAI({ apiKey });
     const planResult = await ai.models.generateContent({
-      model: 'gemini-2.0-flash',
+      model: 'gemini-2.5-flash',
       contents: [{
         role: 'user',
         parts: [{
@@ -5758,7 +5762,7 @@ Guidelines:
 
       // Generate scene data with Gemini
       const sceneResult = await ai.models.generateContent({
-        model: 'gemini-2.0-flash',
+        model: 'gemini-2.5-flash',
         contents: [{
           role: 'user',
           parts: [{
@@ -6044,7 +6048,7 @@ async function handleAnalyzeForAnimation(req, res, sessionId) {
       const audioBase64 = audioBuffer.toString('base64');
 
       const result = await ai.models.generateContent({
-        model: 'gemini-2.0-flash',
+        model: 'gemini-2.5-flash',
         contents: [{
           role: 'user',
           parts: [
@@ -6193,7 +6197,7 @@ Use specific terms, concepts, and themes from the transcript.
 Feel free to add a GIF scene for reactions or emphasis when appropriate!`;
 
     const sceneResult = await genAI.models.generateContent({
-      model: 'gemini-2.0-flash',
+      model: 'gemini-2.5-flash',
       contents: [{ role: 'user', parts: [{ text: scenePrompt }] }],
     });
 
@@ -6551,7 +6555,7 @@ async function handleGenerateTranscriptAnimation(req, res, sessionId) {
       const audioBase64 = audioBuffer.toString('base64');
       const ai = new GoogleGenAI({ apiKey });
       const geminiResponse = await ai.models.generateContent({
-        model: 'gemini-2.0-flash',
+        model: 'gemini-2.5-flash',
         contents: [{
           role: 'user', parts: [
             { inlineData: { mimeType: 'audio/mp3', data: audioBase64 } },
@@ -6648,7 +6652,7 @@ Return JSON array of phrases to animate:
 Pick phrases that are spread throughout the video. Each phrase should be 2-6 words.`;
 
     const analysisResponse = await ai.models.generateContent({
-      model: 'gemini-2.0-flash',
+      model: 'gemini-2.5-flash',
       contents: [{ role: 'user', parts: [{ text: analysisPrompt }] }]
     });
 
@@ -6919,7 +6923,7 @@ async function handleGenerateContextualAnimation(req, res, sessionId) {
       const audioBase64 = audioBuffer.toString('base64');
 
       const result = await ai.models.generateContent({
-        model: 'gemini-2.0-flash',
+        model: 'gemini-2.5-flash',
         contents: [{
           role: 'user',
           parts: [
@@ -7049,7 +7053,7 @@ IMPORTANT: The animation content should directly relate to the video's actual to
 Use specific terms, concepts, and themes from the transcript.`;
 
     const sceneResult = await genAI.models.generateContent({
-      model: 'gemini-2.0-flash',
+      model: 'gemini-2.5-flash',
       contents: [{ role: 'user', parts: [{ text: scenePrompt }] }],
     });
 
@@ -7356,10 +7360,13 @@ async function handleExtractAudio(req, res, sessionId) {
 }
 
 // Get video stream info
-function getVideoInfo(filePath) {
+async function getVideoInfo(filePath) {
   try {
-    const result = execSync(`ffprobe -v error -select_streams v:0 -show_entries stream=width,height,r_frame_rate,pix_fmt -of json "${filePath}"`);
-    const data = JSON.parse(result.toString());
+    const result = await runFFmpegProbe(
+      ['-v', 'error', '-select_streams', 'v:0', '-show_entries', 'stream=width,height,r_frame_rate,pix_fmt', '-of', 'json', filePath],
+      'video-info'
+    );
+    const data = JSON.parse(result);
     return data.streams[0];
   } catch (e) {
     return null;
@@ -7367,10 +7374,13 @@ function getVideoInfo(filePath) {
 }
 
 // Check if a media file has an audio stream
-function hasAudioStream(filePath) {
+async function hasAudioStream(filePath) {
   try {
-    const result = execSync(`ffprobe -v error -select_streams a -show_entries stream=codec_type -of csv=p=0 "${filePath}"`);
-    return result.toString().trim().length > 0;
+    const result = await runFFmpegProbe(
+      ['-v', 'error', '-select_streams', 'a', '-show_entries', 'stream=codec_type', '-of', 'csv=p=0', filePath],
+      'audio-check'
+    );
+    return result.trim().length > 0;
   } catch (e) {
     return false;
   }
@@ -7385,7 +7395,7 @@ async function checkFastConcatCompatibility(session, clips) {
     if (!asset) return false;
     // Fast path only if No Trimming (frame accuracy issues with -c copy on trimmed clips)
     if ((clip.inPoint && clip.inPoint > 0.1) || (clip.duration && Math.abs(clip.duration - asset.duration) > 0.1)) return false;
-    const meta = getVideoInfo(asset.path);
+    const meta = await getVideoInfo(asset.path);
     if (!meta) return false;
     if (!firstMeta) firstMeta = meta;
     else if (meta.width !== firstMeta.width || meta.height !== firstMeta.height ||
@@ -7481,7 +7491,7 @@ async function handleMergeAll(req, res, sessionId) {
             videoStreams.push(`[v${validClipsCount}]`);
 
             // Only add audio filter if the input actually has an audio stream
-            const inputHasAudio = hasAudioStream(asset.path);
+            const inputHasAudio = await hasAudioStream(asset.path);
             if (inputHasAudio) {
               filterParts.push(`[${validClipsCount}:a]atrim=start=${inPoint}:end=${inPoint + duration},asetpts=PTS-STARTPTS[a${validClipsCount}]`);
               hasAnyAudio = true;

@@ -33,6 +33,8 @@ interface TimelineProps {
   redo?: () => void;
   canUndo?: boolean;
   canRedo?: boolean;
+  onBeginDrag?: () => void;
+  onCommitDrag?: () => void;
   volume?: number;
   onVolumeChange?: (volume: number) => void;
 }
@@ -79,6 +81,8 @@ export default function Timeline({
   redo,
   canUndo = false,
   canRedo = false,
+  onBeginDrag,
+  onCommitDrag,
   volume = 0.5,
   onVolumeChange,
 }: TimelineProps) {
@@ -130,18 +134,29 @@ export default function Timeline({
 
       // Select all clips with Ctrl+A
       if ((e.ctrlKey || e.metaKey) && e.key === 'a') {
-        // Don't trigger if user is typing in an input
-        if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) {
-          return;
-        }
+        if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
         e.preventDefault();
         onSelectClips(clips.map(c => c.id));
+      }
+
+      // Undo with Ctrl+Z
+      if ((e.ctrlKey || e.metaKey) && !e.shiftKey && e.key === 'z') {
+        if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
+        e.preventDefault();
+        undo?.();
+      }
+
+      // Redo with Ctrl+Shift+Z or Ctrl+Y
+      if ((e.ctrlKey || e.metaKey) && ((e.shiftKey && e.key === 'Z') || e.key === 'y')) {
+        if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
+        e.preventDefault();
+        redo?.();
       }
     };
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [selectedClipIds, onDeleteClip]);
+  }, [selectedClipIds, onDeleteClip, clips, onSelectClips, undo, redo]);
 
   // Calculate display properties
   const totalDuration = Math.max(duration, 10);
@@ -707,6 +722,7 @@ export default function Timeline({
                           trackHeight={TRACK_HEIGHTS[track.type]}
                           onClick={(modifiers) => onSelectClip(clip.id, modifiers)}
                           onDragStart={() => {
+                            onBeginDrag?.();
                             setDraggedClipInfo({
                               id: clip.id,
                               originalTrackId: track.id,
@@ -793,6 +809,7 @@ export default function Timeline({
                               }
                               return null;
                             });
+                            onCommitDrag?.();
                           }}
                           onResize={(inPoint, outPoint, newStart) =>
                             onResizeClip(clip.id, inPoint, outPoint, newStart)

@@ -21,6 +21,12 @@ npm run cf-typegen       # Generate Cloudflare worker types
 
 **Local development** requires both `npm run dev` and `npm run ffmpeg-server` running simultaneously.
 
+If a port is already in use (EADDRINUSE), kill it in PowerShell:
+```powershell
+Stop-Process -Id (Get-NetTCPConnection -LocalPort 3333).OwningProcess -Force  # FFmpeg server
+Stop-Process -Id (Get-NetTCPConnection -LocalPort 5173).OwningProcess -Force  # Vite
+```
+
 ## Architecture
 
 ```
@@ -36,11 +42,16 @@ scripts/
 └── local-ffmpeg-server.js  # Session-based FFmpeg server with Whisper transcription
 ```
 
+**Largest files** (where most complexity lives):
+- `src/react-app/pages/Home.tsx` — ~2400 lines (main editor orchestration)
+- `src/react-app/hooks/useProject.ts` — ~1200 lines (central state manager)
+- `scripts/local-ffmpeg-server.js` — ~7900 lines (all video processing)
+
 **Key patterns:**
 - Multi-track timeline with 6 tracks: T1 (captions), V3 (top overlay), V2 (overlay), V1 (base video), A1/A2 (audio)
 - `useProject()` hook manages all project state: assets, clips, playback, captions, rendering
 - Local FFmpeg server (port 3333) handles sessions, asset storage, thumbnail generation, rendering, and Whisper-based transcription for captions
-- Cloudflare Worker with D1 database and R2 bucket for production (configured in wrangler.json)
+- Cloudflare Worker (Hono) with D1 database and R2 bucket for production — 3 endpoints: `POST /api/ai-edit/start` (async job), `GET /api/ai-edit/status/:jobId` (poll), `POST /api/ai-edit` (legacy sync)
 
 ## State Management
 
@@ -65,7 +76,7 @@ The `useProject()` hook in `src/react-app/hooks/useProject.ts` is the central st
 
 ## FFmpeg Server
 
-The local FFmpeg server (`scripts/local-ffmpeg-server.js`, ~7700 lines) is a raw Node.js `http.createServer` with regex-based route matching. It handles all video processing, asset management, Remotion rendering, transcription, and fal.ai calls. The Cloudflare Worker only generates FFmpeg commands via Gemini — it does NOT execute them.
+The local FFmpeg server (`scripts/local-ffmpeg-server.js`, ~7900 lines) is a raw Node.js `http.createServer` with regex-based route matching. It handles all video processing, asset management, Remotion rendering, transcription, and fal.ai calls. The Cloudflare Worker only generates FFmpeg commands via Gemini — it does NOT execute them.
 
 Key endpoints on `localhost:3333`:
 - `POST /session/create` - Create new editing session
@@ -135,10 +146,10 @@ The right panel has three AI agents accessible via tabs. All three panels are al
 
 Captions use local OpenAI Whisper (`scripts/whisper-transcribe.py`). Setup:
 ```bash
-pip3 install openai-whisper torch
+pip install openai-whisper torch
 ```
 - **MPS (Apple GPU) is NOT supported** — Whisper's sparse tensors crash on MPS. The script runs on CPU only. Do not add `device="mps"`.
-- Falls back to Gemini API if local Whisper is unavailable (but Gemini struggles with long audio files).
+- 3-tier fallback: local Whisper (free) → OpenAI Whisper API (requires `OPENAI_API_KEY`) → Gemini API (timestamps may drift on long audio).
 - The `base` model is used by default (good speed/accuracy balance).
 
 ## Dead Air Removal

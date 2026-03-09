@@ -54,8 +54,10 @@ export default function TimelineClip({
   isCaption = false,
 }: TimelineClipProps) {
   const [isDragging, setIsDragging] = useState(false);
+  const [hasDragMoved, setHasDragMoved] = useState(false);
   const [isResizingLeft, setIsResizingLeft] = useState(false);
   const [isResizingRight, setIsResizingRight] = useState(false);
+  const [isHovered, setIsHovered] = useState(false);
   const [dragStartX, setDragStartX] = useState(0);
   const [dragStartY, setDragStartY] = useState(0);
   const [dragX, setDragX] = useState(0);
@@ -64,6 +66,7 @@ export default function TimelineClip({
   const [initialInPoint, setInitialInPoint] = useState(0);
   const [initialOutPoint, setInitialOutPoint] = useState(0);
 
+  const DRAG_THRESHOLD = 4;
   const clipRef = useRef<HTMLDivElement>(null);
 
   const Icon = getAssetIcon(isCaption ? 'caption' : asset?.type);
@@ -89,14 +92,17 @@ export default function TimelineClip({
       setDragStartX(e.clientX);
       setInitialInPoint(clip.inPoint);
       setInitialStart(clip.start);
+      onDragStart?.();
     } else if (clickX > rect.width - handleWidth) {
       // Right resize handle
       setIsResizingRight(true);
       setDragStartX(e.clientX);
       setInitialOutPoint(clip.outPoint);
+      onDragStart?.();
     } else {
       // Main body - dragging
       setIsDragging(true);
+      setHasDragMoved(false);
       setDragStartX(e.clientX);
       setDragStartY(e.clientY);
       setDragX(0);
@@ -119,6 +125,9 @@ export default function TimelineClip({
 
       if (isDragging) {
         const deltaY = e.clientY - dragStartY;
+        if (!hasDragMoved && Math.abs(deltaX) + Math.abs(deltaY) >= DRAG_THRESHOLD) {
+          setHasDragMoved(true);
+        }
         setDragX(deltaX);
         setDragY(deltaY);
         onDragProgress?.(deltaX, deltaY, e.clientX, e.clientY);
@@ -142,6 +151,7 @@ export default function TimelineClip({
 
     const handleMouseUp = () => {
       setIsDragging(false);
+      setHasDragMoved(false);
       setIsResizingLeft(false);
       setIsResizingRight(false);
       setDragX(0);
@@ -158,6 +168,7 @@ export default function TimelineClip({
     };
   }, [
     isDragging,
+    hasDragMoved,
     isResizingLeft,
     isResizingRight,
     dragStartX,
@@ -182,7 +193,9 @@ export default function TimelineClip({
         onClick({ multi: e.ctrlKey || e.metaKey, range: e.shiftKey });
       }}
       onMouseDown={handleMouseDown}
-      className={`absolute rounded-md bg-gradient-to-r ${colorClass} ${isDragging
+      onMouseEnter={() => setIsHovered(true)}
+      onMouseLeave={() => setIsHovered(false)}
+      className={`absolute rounded-md bg-gradient-to-r ${colorClass} ${hasDragMoved
         ? 'opacity-90 shadow-2xl shadow-black/80 z-50 cursor-grabbing ring-2 ring-orange-400'
         : isResizingLeft || isResizingRight
           ? 'cursor-ew-resize z-20 ring-2 ring-orange-400'
@@ -195,9 +208,9 @@ export default function TimelineClip({
         width: `${width}px`,
         top: '4px',
         height: `${trackHeight - 8}px`,
-        transform: isDragging ? `translate(${dragX}px, ${dragY}px) rotate(-2deg) scale(1.05)` : 'none',
+        transform: hasDragMoved ? `translate(${dragX}px, ${dragY}px) rotate(-0.5deg) scale(1.02)` : isDragging ? `translate(${dragX}px, ${dragY}px)` : 'none',
         transformOrigin: 'center center',
-        transition: isDragging ? 'none' : 'transform 0.1s ease-out',
+        transition: hasDragMoved ? 'none' : isDragging ? 'none' : 'transform 0.1s ease-out',
       }}
     >
       {/* Left edge indicator - prominent orange line showing cut point */}
@@ -264,8 +277,8 @@ export default function TimelineClip({
         }}
       />
 
-      {/* Delete button (shown when selected) */}
-      {isSelected && (
+      {/* Delete button (shown on hover) */}
+      {isHovered && !isDragging && (
         <button
           onClick={(e) => {
             e.stopPropagation();

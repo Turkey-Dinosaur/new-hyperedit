@@ -123,22 +123,28 @@ export function useProject() {
   const [assets, setAssets] = useState<Asset[]>([]);
   const [tracks, setTracks] = useState<Track[]>([
     { id: 'T1', type: 'text', name: 'T1', order: 0 },   // Captions/text track (top)
-    { id: 'V3', type: 'video', name: 'V3', order: 1 },  // Top overlay
+    { id: 'V1', type: 'video', name: 'V1', order: 1 },  // Base video track
     { id: 'V2', type: 'video', name: 'V2', order: 2 },  // Overlay
-    { id: 'V1', type: 'video', name: 'V1', order: 3 },  // Base video track
+    { id: 'V3', type: 'video', name: 'V3', order: 3 },  // Top overlay
     { id: 'A1', type: 'audio', name: 'A1', order: 4 },  // Audio track 1
     { id: 'A2', type: 'audio', name: 'A2', order: 5 },  // Audio track 2
   ]);
   const [clips, setClips] = useState<TimelineClip[]>([]);
-  const [undoHistory, setUndoHistory] = useState<TimelineClip[][]>([]);
-  const [redoHistory, setRedoHistory] = useState<TimelineClip[][]>([]);
+  interface HistorySnapshot {
+    clips: TimelineClip[];
+    captionData: Record<string, CaptionData>;
+  }
+  const [undoHistory, setUndoHistory] = useState<HistorySnapshot[]>([]);
+  const [redoHistory, setRedoHistory] = useState<HistorySnapshot[]>([]);
   const [captionData, setCaptionData] = useState<Record<string, CaptionData>>({});
+  const captionDataRef = useRef(captionData);
+  const preDragClipsRef = useRef<TimelineClip[] | null>(null);
 
   // History Recording Helper
   const recordHistory = useCallback((currentClips: TimelineClip[]) => {
     setUndoHistory(prev => {
-      const next = [...prev, [...currentClips]];
-      if (next.length > 50) next.shift(); // Limit history to 50 states
+      const next = [...prev, { clips: [...currentClips], captionData: { ...captionDataRef.current } }];
+      if (next.length > 50) next.shift();
       return next;
     });
     setRedoHistory([]);
@@ -150,8 +156,9 @@ export function useProject() {
       if (prev.length === 0) return prev;
       const historyCopy = [...prev];
       const previousState = historyCopy.pop()!;
-      setRedoHistory(rList => [[...clips], ...rList]);
-      setClips(previousState);
+      setRedoHistory(rList => [{ clips: [...clips], captionData: { ...captionDataRef.current } }, ...rList]);
+      setClips(previousState.clips);
+      setCaptionData(previousState.captionData);
       return historyCopy;
     });
   }, [clips]);
@@ -161,14 +168,32 @@ export function useProject() {
       if (prev.length === 0) return prev;
       const historyCopy = [...prev];
       const nextState = historyCopy.shift()!;
-      setUndoHistory(uList => [...uList, [...clips]]);
-      setClips(nextState);
+      setUndoHistory(uList => [...uList, { clips: [...clips], captionData: { ...captionDataRef.current } }]);
+      setClips(nextState.clips);
+      setCaptionData(nextState.captionData);
       return historyCopy;
     });
   }, [clips]);
 
   const canUndo = undoHistory.length > 0;
   const canRedo = redoHistory.length > 0;
+
+  // Drag history helpers — call beginDrag at start, commitDrag at end (one undo entry per gesture)
+  const beginDrag = useCallback(() => {
+    preDragClipsRef.current = [...clips];
+  }, [clips]);
+
+  const commitDrag = useCallback(() => {
+    if (preDragClipsRef.current) {
+      recordHistory(preDragClipsRef.current);
+      preDragClipsRef.current = null;
+    }
+  }, [recordHistory]);
+
+  // Snapshot for Home.tsx callers that do direct setClips (auto-order, merge)
+  const recordSnapshot = useCallback(() => {
+    recordHistory(clips);
+  }, [clips, recordHistory]);
 
   // Timeline tabs for editing clips in isolation
   const [timelineTabs, setTimelineTabs] = useState<TimelineTab[]>([
@@ -209,6 +234,7 @@ export function useProject() {
   useEffect(() => { tracksRef.current = tracks; }, [tracks]);
   useEffect(() => { clipsRef.current = clips; }, [clips]);
   useEffect(() => { settingsRef.current = settings; }, [settings]);
+  useEffect(() => { captionDataRef.current = captionData; }, [captionData]);
 
   // Wrapper to persist session to localStorage
   const setSession = useCallback((sessionOrUpdater: SessionInfo | null | ((prev: SessionInfo | null) => SessionInfo | null)) => {
@@ -627,7 +653,7 @@ export function useProject() {
   }, []);
 
   // Resize clip (change in/out points or duration)
-  const resizeClip = useCallback((clipId: string, newInPoint: number, newOutPoint: number): void => {
+  const resizeClip = useCallback((clipId: string, newInPoint: number, newOutPoint: number, newStart?: number): void => {
     setClips(prev => prev.map(c => {
       if (c.id !== clipId) return c;
       const newDuration = newOutPoint - newInPoint;
@@ -636,6 +662,7 @@ export function useProject() {
         inPoint: newInPoint,
         outPoint: newOutPoint,
         duration: newDuration,
+        ...(newStart !== undefined ? { start: newStart } : {}),
       };
     }));
   }, []);
@@ -652,6 +679,8 @@ export function useProject() {
     if (timeInClip <= 0.05 || timeInClip >= clip.duration - 0.05) {
       return null; // Split too close to edge
     }
+
+    recordHistory(clips);
 
     // Calculate the in-point offset for the split
     const splitInPoint = clip.inPoint + timeInClip;
@@ -810,6 +839,7 @@ export function useProject() {
     duration: number,
     style?: Partial<CaptionStyle>
   ): TimelineClip => {
+    recordHistory(clips);
     const clipId = crypto.randomUUID();
 
     // Create the timeline clip
@@ -833,7 +863,7 @@ export function useProject() {
     setCaptionData(prev => ({ ...prev, [clipId]: captionInfo }));
 
     return clip;
-  }, []);
+  }, [clips, recordHistory]);
 
   // Add multiple caption clips at once (batched for performance)
   const addCaptionClipsBatch = useCallback((
@@ -844,6 +874,7 @@ export function useProject() {
       style?: Partial<CaptionStyle>;
     }>
   ): TimelineClip[] => {
+    recordHistory(clips);
     const newClips: TimelineClip[] = [];
     const newCaptionData: Record<string, CaptionData> = {};
 
@@ -871,7 +902,7 @@ export function useProject() {
     setCaptionData(prev => ({ ...prev, ...newCaptionData }));
 
     return newClips;
-  }, []);
+  }, [clips, recordHistory]);
 
   // Update caption style
   const updateCaptionStyle = useCallback((clipId: string, styleUpdates: Partial<CaptionStyle>): void => {
@@ -1135,6 +1166,9 @@ export function useProject() {
     redo,
     canUndo,
     canRedo,
+    beginDrag,
+    commitDrag,
+    recordSnapshot,
 
     // Captions
     captionData,

@@ -32,7 +32,7 @@ export default function Home() {
   const [showChapters, setShowChapters] = useState(false);
   const [copied, setCopied] = useState(false);
   const [previewAssetId, setPreviewAssetId] = useState<string | null>(null);
-  const [aspectRatio, setAspectRatio] = useState<'16:9' | '9:16' | 'auto'>('auto');
+  const [aspectRatio, setAspectRatio] = useState<'16:9' | '9:16' | 'auto'>('9:16');
   const [autoSnap, setAutoSnap] = useState(true); // Ripple delete mode - shift clips when deleting
   const [masterVolume, setMasterVolume] = useState(0.5);
   const [activeAgent, setActiveAgent] = useState<'director' | 'picasso' | 'dicaprio'>('director');
@@ -61,6 +61,7 @@ export default function Home() {
     moveClip,
     finalizeClipMove,
     splitClip,
+    resizeClip,
     saveProject,
     loadProject,
     renderProject,
@@ -85,6 +86,9 @@ export default function Home() {
     redo,
     canUndo,
     canRedo,
+    beginDrag,
+    commitDrag,
+    recordSnapshot,
   } = useProject();
 
   // Compute the active clips based on which tab is selected
@@ -524,17 +528,9 @@ export default function Home() {
         updateTabClips(activeTabId, updatedClips);
       }
     } else {
-      const clip = clips.find(c => c.id === clipId);
-      if (!clip) return;
-
-      updateClip(clipId, {
-        inPoint: newInPoint,
-        outPoint: newOutPoint,
-        duration: newDuration,
-        start: newStart ?? clip.start,
-      });
+      resizeClip(clipId, newInPoint, newOutPoint, newStart);
     }
-  }, [clips, updateClip, activeTabId, timelineTabs, updateTabClips]);
+  }, [resizeClip, activeTabId, timelineTabs, updateTabClips]);
 
   // Handle deleting clip from timeline (with autoSnap/ripple support)
   const handleDeleteClip = useCallback((clipId: string) => {
@@ -1695,6 +1691,7 @@ export default function Home() {
 
     // Apply the reordered clips
     if (activeTabId === 'main') {
+      recordSnapshot();
       setClips(reorderedAllClips);
     } else {
       updateTabClips(activeTabId, reorderedAllClips);
@@ -1782,6 +1779,7 @@ export default function Home() {
 
             // Replace all clips on the current timeline with this single one
             if (activeTabId === 'main') {
+              recordSnapshot();
               setClips([mergedClip]);
               setSelectedClipIds([mergedClip.id]);
             } else {
@@ -2252,6 +2250,8 @@ export default function Home() {
               redo={redo}
               canUndo={canUndo}
               canRedo={canRedo}
+              onBeginDrag={beginDrag}
+              onCommitDrag={commitDrag}
               volume={masterVolume}
               onVolumeChange={setMasterVolume}
             />
