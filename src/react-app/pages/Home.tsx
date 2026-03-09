@@ -8,6 +8,7 @@ import AIPromptPanel from '@/react-app/components/AIPromptPanel';
 import PicassoPanel from '@/react-app/components/PicassoPanel';
 import DiCaprioPanel from '@/react-app/components/DiCaprioPanel';
 import GifSearchPanel from '@/react-app/components/GifSearchPanel';
+import ExportModal from '@/react-app/components/ExportModal';
 import ResizablePanel from '@/react-app/components/ResizablePanel';
 import ResizableVerticalPanel from '@/react-app/components/ResizableVerticalPanel';
 import TimelineTabs from '@/react-app/components/TimelineTabs';
@@ -37,6 +38,16 @@ export default function Home() {
   const [masterVolume, setMasterVolume] = useState(0.5);
   const [activeAgent, setActiveAgent] = useState<'director' | 'picasso' | 'dicaprio'>('director');
   const [showGifSearch, setShowGifSearch] = useState(false);
+  const [exportModal, setExportModal] = useState<{
+    isOpen: boolean;
+    status: 'rendering' | 'complete' | 'error';
+    progress: number;
+    statusMessage?: string;
+    etaSeconds?: number | null;
+    videoUrl?: string;
+    filePath?: string;
+    errorMessage?: string;
+  }>({ isOpen: false, status: 'rendering', progress: 0 });
 
   const videoPreviewRef = useRef<VideoPreviewHandle>(null);
   const playbackRef = useRef<number | null>(null);
@@ -1805,6 +1816,101 @@ export default function Home() {
     });
   }, [session, clips, assets, activeTabId, timelineTabs, refreshAssets, setClips, saveProject, updateTabClips]);
 
+  // Handle auto-edit (Use Template) — flagship feature
+  const handleUseTemplate = useCallback(async (onProgress?: (status: string) => void) => {
+    if (!session?.sessionId) {
+      throw new Error('Please upload a video first to start a session');
+    }
+
+    const activeClips = activeTabId === 'main' ? clips : (timelineTabs.find(t => t.id === activeTabId)?.clips || []);
+    const v1Clip = activeClips.find(c => c.trackId === 'V1');
+    if (!v1Clip) {
+      throw new Error('No video on the V1 track. Please add a video first.');
+    }
+
+    // Step 1: Start the job (returns 202 + jobId)
+    const response = await fetch(
+      `http://localhost:3333/session/${session.sessionId}/use-template`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ assetId: v1Clip.assetId }),
+      }
+    );
+    if (!response.ok) {
+      const error = await response.json();
+      throw new Error(error.error || 'Failed to start auto-edit');
+    }
+    const { jobId } = await response.json();
+
+    if (!jobId) {
+      throw new Error('No job ID returned from server');
+    }
+
+    // Step 2: Poll for completion
+    return new Promise<{ totalDuration: number; editDecisions: { reason: string }[]; contentAnalysis: { content_type: string }; editingNotes: string }>((resolve, reject) => {
+      const pollInterval = setInterval(async () => {
+        try {
+          const res = await fetch(
+            `http://localhost:3333/session/${session.sessionId}/job-progress/${jobId}`
+          );
+          if (!res.ok) throw new Error('Failed to fetch job progress');
+          const job = await res.json();
+
+          if (job.status === 'completed') {
+            clearInterval(pollInterval);
+            const data = job.result;
+
+            // Refresh assets so new timelapse assets are available
+            await refreshAssets();
+
+            // Record undo snapshot before modifying timeline
+            recordSnapshot();
+
+            // Keep non-V1 clips, rebuild V1 from edit decisions
+            const otherClips = activeClips.filter(c => c.trackId !== 'V1');
+            let timelinePos = 0;
+            const newV1Clips = (data.editDecisions || []).map((d: { assetId: string; clipInPoint: number; clipOutPoint: number; clipDuration: number }) => {
+              const clip = {
+                id: crypto.randomUUID(),
+                assetId: d.assetId,
+                trackId: 'V1' as const,
+                start: timelinePos,
+                duration: d.clipDuration,
+                inPoint: d.clipInPoint,
+                outPoint: d.clipOutPoint,
+              };
+              timelinePos += d.clipDuration;
+              return clip;
+            });
+
+            const allClips = [...otherClips, ...newV1Clips];
+            if (activeTabId !== 'main') {
+              updateTabClips(activeTabId, allClips);
+            } else {
+              setClips(allClips);
+            }
+
+            setCurrentTime(0);
+            await saveProject();
+            resolve(data);
+          } else if (job.status === 'failed') {
+            clearInterval(pollInterval);
+            reject(new Error(job.error || 'Auto-edit failed'));
+          } else if (onProgress) {
+            const etaText = job.etaSeconds > 0
+              ? ` (Est. ${job.etaSeconds > 60 ? Math.round(job.etaSeconds / 60) + 'm' : job.etaSeconds + 's'} remaining)`
+              : '';
+            onProgress(`${job.statusMessage || 'Processing...'} ${job.progress}%${etaText}`);
+          }
+        } catch (err) {
+          clearInterval(pollInterval);
+          reject(err);
+        }
+      }, 1000);
+    });
+  }, [session, clips, activeTabId, timelineTabs, refreshAssets, recordSnapshot, setClips, updateTabClips, saveProject, setCurrentTime]);
+
   // Handle contextual animation creation (uses video content to inform the animation)
   const handleCreateContextualAnimation = useCallback(async (request: {
     type: 'intro' | 'outro' | 'transition' | 'highlight';
@@ -1870,27 +1976,88 @@ export default function Home() {
     }
   }, [session, assets, addClip, saveProject, getDuration, refreshAssets]);
 
-  // Handle render/export
+  // Handle render/export with progress tracking
   const handleExport = useCallback(async () => {
     if (clips.length === 0) {
       alert('Add some clips to the timeline first');
       return;
     }
+    if (!session?.sessionId) return;
+
+    setExportModal({ isOpen: true, status: 'rendering', progress: 0, statusMessage: 'Saving project...' });
 
     try {
-      const downloadUrl = await renderProject(false);
-      // Trigger download
-      const link = document.createElement('a');
-      link.href = downloadUrl;
-      link.download = 'export.mp4';
-      document.body.appendChild(link);
-      link.click();
-      document.body.removeChild(link);
+      // Save project first
+      await saveProject();
+
+      // Start render — returns 202 with jobId
+      const renderRes = await fetch(`http://localhost:3333/session/${session.sessionId}/render`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ preview: false }),
+      });
+
+      if (!renderRes.ok && renderRes.status !== 202) {
+        const err = await renderRes.json();
+        throw new Error(err.error || 'Render failed');
+      }
+
+      const { jobId } = await renderRes.json();
+
+      // Poll for progress
+      const poll = (): Promise<{ downloadUrl: string; filePath: string }> => new Promise((resolve, reject) => {
+        const interval = setInterval(async () => {
+          try {
+            const res = await fetch(`http://localhost:3333/session/${session.sessionId}/job-progress/${jobId}`);
+            if (!res.ok) return; // retry on transient failures
+
+            const job = await res.json();
+
+            setExportModal(prev => ({
+              ...prev,
+              progress: job.progress || 0,
+              statusMessage: job.statusMessage || 'Encoding...',
+              etaSeconds: job.etaSeconds,
+            }));
+
+            if (job.status === 'completed') {
+              clearInterval(interval);
+              resolve({
+                downloadUrl: `http://localhost:3333${job.downloadUrl}`,
+                filePath: job.filePath || '',
+              });
+            } else if (job.status === 'failed') {
+              clearInterval(interval);
+              reject(new Error(job.error || 'Render failed'));
+            }
+          } catch (e) {
+            // Network error during poll — keep trying
+          }
+        }, 800);
+      });
+
+      const result = await poll();
+
+      // Refresh assets so the rendered video appears in the asset library
+      await refreshAssets();
+
+      setExportModal({
+        isOpen: true,
+        status: 'complete',
+        progress: 100,
+        videoUrl: result.downloadUrl,
+        filePath: result.filePath,
+      });
     } catch (error) {
       console.error('Export failed:', error);
-      alert(`Export failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
+      setExportModal({
+        isOpen: true,
+        status: 'error',
+        progress: 0,
+        errorMessage: error instanceof Error ? error.message : 'Export failed',
+      });
     }
-  }, [clips.length, renderProject]);
+  }, [clips.length, session, saveProject, refreshAssets]);
 
   // Edit an existing animation with a new prompt
   const handleEditAnimation = useCallback(async (
@@ -2320,6 +2487,7 @@ export default function Home() {
                   onExtractAudio={handleExtractAudio}
                   onAutoOrder={handleAutoOrder}
                   onMergeAll={handleMergeAll}
+                  onUseTemplate={handleUseTemplate}
                   onCreateContextualAnimation={handleCreateContextualAnimation}
                   onOpenAnimationInTab={handleOpenAnimationInTab}
                   onEditAnimation={handleEditAnimation}
@@ -2369,6 +2537,20 @@ export default function Home() {
           onGifAdded={handleGifAdded}
         />
       )}
+
+      {/* Export Modal */}
+      <ExportModal
+        isOpen={exportModal.isOpen}
+        status={exportModal.status}
+        progress={exportModal.progress}
+        statusMessage={exportModal.statusMessage}
+        etaSeconds={exportModal.etaSeconds}
+        videoUrl={exportModal.videoUrl}
+        filePath={exportModal.filePath}
+        errorMessage={exportModal.errorMessage}
+        onClose={() => setExportModal({ isOpen: false, status: 'rendering', progress: 0 })}
+        onRetry={handleExport}
+      />
     </div>
   );
 }

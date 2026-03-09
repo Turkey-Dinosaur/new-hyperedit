@@ -181,6 +181,7 @@ interface AIPromptPanelProps {
   onExtractAudio?: () => Promise<ExtractAudioResult>;
   onAutoOrder?: () => Promise<void>;
   onMergeAll?: (onProgress?: (status: string) => void) => Promise<void>;
+  onUseTemplate?: (onProgress?: (status: string) => void) => Promise<{ totalDuration: number; editDecisions: { reason: string }[]; contentAnalysis: { content_type: string }; editingNotes: string }>;
   onOpenAnimationInTab?: (assetId: string, animationName: string) => string | undefined;
   onEditAnimation?: (assetId: string, editPrompt: string, v1Context?: EditTabV1Context, tabIdToUpdate?: string) => Promise<{ assetId: string; duration: number; sceneCount: number }>;
   isApplying?: boolean;
@@ -217,6 +218,7 @@ export default function AIPromptPanel({
   onExtractAudio,
   onAutoOrder,
   onMergeAll,
+  onUseTemplate,
   onOpenAnimationInTab,
   onEditAnimation,
   isApplying,
@@ -544,6 +546,7 @@ export default function AIPromptPanel({
   ];
 
   const suggestions = [
+    { icon: Wand2, text: 'Auto-Edit (Use Template)' },
     { icon: Type, text: 'Add captions' },
     { icon: VolumeX, text: 'Remove dead air / silence' },
     { icon: Wand2, text: 'Remove background noise' },
@@ -899,6 +902,7 @@ export default function AIPromptPanel({
     | 'auto-order'          // Chronological reorder
     | 'merge-all'           // Merge all clips into one
     | 'ffmpeg-edit'         // Direct FFmpeg video manipulation
+    | 'use-template'        // Intelligent auto-edit (flagship feature)
     | 'unknown';            // Need to ask for clarification
 
   interface DirectorContext {
@@ -918,6 +922,16 @@ export default function AIPromptPanel({
 
   const determineWorkflow = (ctx: DirectorContext): WorkflowType => {
     const lower = ctx.prompt.toLowerCase();
+
+    // ============================================
+    // AUTO-EDIT (must check before context-aware decisions since "Auto-Edit" contains "edit")
+    // ============================================
+    if (lower.includes('auto-edit') || lower.includes('auto edit') ||
+      lower.includes('use template') || lower.includes('viral edit') ||
+      lower.includes('smart edit') || lower.includes('auto cut') ||
+      lower.includes('auto clip') || lower.includes('highlight reel')) {
+      return 'use-template';
+    }
 
     // ============================================
     // CONTEXT-AWARE DECISIONS
@@ -1990,6 +2004,45 @@ export default function AIPromptPanel({
     }
   };
 
+  const handleUseTemplateWorkflow = async () => {
+    if (!onUseTemplate) return;
+
+    setIsProcessing(true);
+    setProcessingStatus('Starting auto-edit...');
+
+    setChatHistory(prev => [...prev, {
+      type: 'assistant',
+      text: 'Analyzing your video — detecting scenes, transcribing audio, and building an intelligent edit. This may take a few minutes for longer videos...',
+      isProcessingGifs: true,
+    }]);
+
+    try {
+      const result = await onUseTemplate(setProcessingStatus);
+      setChatHistory(prev => {
+        const updated = [...prev];
+        const lastIdx = updated.length - 1;
+        if (updated[lastIdx]?.isProcessingGifs) {
+          updated[lastIdx] = {
+            ...updated[lastIdx],
+            text: `Auto-edit complete! Created a ${Math.round(result.totalDuration)}s ${result.contentAnalysis?.content_type || ''} edit with ${result.editDecisions?.length || 0} clips.${result.editingNotes ? '\n\n' + result.editingNotes : ''}`,
+            isProcessingGifs: false,
+            applied: true,
+          };
+        }
+        return updated;
+      });
+    } catch (error) {
+      console.error('Auto-edit failed:', error);
+      setChatHistory(prev => [...prev, {
+        type: 'assistant',
+        text: `Failed to auto-edit: ${error instanceof Error ? error.message : 'Unknown error'}`,
+      }]);
+    } finally {
+      setIsProcessing(false);
+      setProcessingStatus('');
+    }
+  };
+
   const handleExtractAudioWorkflow = async () => {
     if (!onExtractAudio) return;
 
@@ -2241,6 +2294,19 @@ export default function AIPromptPanel({
     // Merge all clips
     if (workflow === 'merge-all') {
       await handleMergeAllWorkflow();
+      return;
+    }
+
+    // Auto-edit (Use Template)
+    if (workflow === 'use-template') {
+      if (!hasVideo) {
+        setChatHistory(prev => [...prev, {
+          type: 'assistant',
+          text: 'Please add a video to the timeline first. I\'ll then analyze it and create an intelligent edit.',
+        }]);
+        return;
+      }
+      await handleUseTemplateWorkflow();
       return;
     }
 

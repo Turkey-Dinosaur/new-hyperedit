@@ -98,6 +98,7 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(({
   const containerRef = useRef<HTMLDivElement>(null);
   const [draggingLayer, setDraggingLayer] = useState<string | null>(null);
   const [dragStart, setDragStart] = useState<{ x: number; y: number; layerX: number; layerY: number } | null>(null);
+  const prevBaseLayerIdRef = useRef<string | undefined>(undefined);
 
   // Find the base video layer (V1) for audio/playback control
   const foundBaseLayer = layers.find(l => l.trackId === 'V1' && l.type === 'video');
@@ -166,6 +167,26 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(({
     }
   }, [baseLayerClipTime, isPlaying]);
 
+  // Handle clip boundary transitions during playback
+  useEffect(() => {
+    const video = videoRef.current;
+    if (!video || !isPlaying) {
+      prevBaseLayerIdRef.current = baseLayerId;
+      return;
+    }
+
+    if (prevBaseLayerIdRef.current !== undefined && prevBaseLayerIdRef.current !== baseLayerId) {
+      if (baseLayerClipTime !== undefined) {
+        video.currentTime = baseLayerClipTime;
+      }
+      if (video.paused) {
+        video.play().catch(() => {});
+      }
+    }
+
+    prevBaseLayerIdRef.current = baseLayerId;
+  }, [baseLayerId, baseLayerClipTime, isPlaying]);
+
   // Play/pause control for base video
   useEffect(() => {
     const video = videoRef.current;
@@ -212,10 +233,13 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(({
     });
   }, [layers, isPlaying]);
 
-  // Seek on load
+  // Seek on load (and resume playback if source changed mid-play)
   const handleLoaded = () => {
     if (videoRef.current && baseLayerClipTime !== undefined) {
       videoRef.current.currentTime = baseLayerClipTime;
+    }
+    if (isPlaying && videoRef.current) {
+      videoRef.current.play().catch(() => {});
     }
   };
 

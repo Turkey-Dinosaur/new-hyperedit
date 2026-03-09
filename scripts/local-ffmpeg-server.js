@@ -1,6 +1,6 @@
 import http from 'http';
 import { spawn, execSync } from 'child_process';
-import { createWriteStream, createReadStream, unlinkSync, mkdirSync, existsSync, writeFileSync, readFileSync, readdirSync, statSync } from 'fs';
+import { createWriteStream, createReadStream, unlinkSync, mkdirSync, existsSync, writeFileSync, readFileSync, readdirSync, statSync, copyFileSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
 import { randomUUID } from 'crypto';
@@ -294,7 +294,7 @@ setInterval(() => {
 }, 30 * 60 * 1000); // Check every 30 minutes
 
 // Run FFmpeg command and return a promise
-function runFFmpeg(args, jobId) {
+function runFFmpeg(args, jobId, onProgress) {
   return new Promise((resolve, reject) => {
     const ffmpeg = spawn('ffmpeg', args);
     let stderr = '';
@@ -305,6 +305,15 @@ function runFFmpeg(args, jobId) {
       for (const line of lines) {
         if (line.includes('time=') || line.includes('frame=')) {
           process.stdout.write(`\r[${jobId}] ${line.trim()}`);
+
+          // Parse time= for progress reporting
+          if (onProgress) {
+            const timeMatch = line.match(/time=(\d+):(\d+):(\d+\.\d+)/);
+            if (timeMatch) {
+              const secs = parseInt(timeMatch[1]) * 3600 + parseInt(timeMatch[2]) * 60 + parseFloat(timeMatch[3]);
+              onProgress(secs);
+            }
+          }
         }
       }
     });
@@ -1906,7 +1915,7 @@ async function handleProjectSave(req, res, sessionId) {
   }
 }
 
-// Render project to video
+// Render project to video (async job with progress)
 async function handleProjectRender(req, res, sessionId) {
   const session = getSession(sessionId);
   if (!session) {
@@ -1930,152 +1939,292 @@ async function handleProjectRender(req, res, sessionId) {
       return;
     }
 
-    console.log(`\n[${sessionId}] === RENDER ${isPreview ? 'PREVIEW' : 'EXPORT'} ===`);
-    console.log(`[${sessionId}] ${clips.length} clips, ${settings.width}x${settings.height}`);
+    // Create job for progress tracking
+    const jobId = randomUUID();
+    const job = {
+      id: jobId,
+      type: 'render',
+      status: 'processing',
+      progress: 0,
+      statusMessage: 'Preparing render...',
+      startTime: Date.now(),
+      etaSeconds: null,
+      downloadUrl: null,
+      error: null,
+    };
+    jobs.set(jobId, job);
 
-    // Sort clips by track for layering (V1 first, then V2, etc.)
-    const videoClips = clips
-      .filter(c => session.assets.get(c.assetId)?.type !== 'audio')
-      .sort((a, b) => {
-        const trackOrder = { 'V1': 0, 'V2': 1, 'V3': 2 };
-        return (trackOrder[a.trackId] || 0) - (trackOrder[b.trackId] || 0);
-      });
+    // Return 202 immediately with jobId
+    res.writeHead(202, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+    res.end(JSON.stringify({ jobId }));
 
-    const audioClips = clips
-      .filter(c => session.assets.get(c.assetId)?.type === 'audio');
+    // Run render in background
+    (async () => {
+      try {
+        console.log(`\n[${jobId}] === RENDER ${isPreview ? 'PREVIEW' : 'EXPORT'} ===`);
+        console.log(`[${jobId}] ${clips.length} clips, ${settings.width}x${settings.height}`);
 
-    // Calculate total duration from all clips
-    const totalDuration = Math.max(
-      ...clips.map(c => c.start + c.duration),
-      0.1
-    );
+        job.statusMessage = 'Building render pipeline...';
+        job.progress = 2;
 
-    // Build FFmpeg filter_complex
-    const inputs = [];
-    const filterParts = [];
-    let inputIndex = 0;
+        // Sort clips by track for layering (V1 first, then V2, etc.)
+        const videoClips = clips
+          .filter(c => session.assets.get(c.assetId)?.type !== 'audio')
+          .sort((a, b) => {
+            const trackOrder = { 'V1': 0, 'V2': 1, 'V3': 2 };
+            return (trackOrder[a.trackId] || 0) - (trackOrder[b.trackId] || 0);
+          });
 
-    // Create black background
-    filterParts.push(`color=black:s=${settings.width}x${settings.height}:d=${totalDuration}:r=${settings.fps}[base]`);
-    let lastVideo = 'base';
+        const audioClips = clips
+          .filter(c => session.assets.get(c.assetId)?.type === 'audio');
 
-    // Process video clips
-    for (const clip of videoClips) {
-      const asset = session.assets.get(clip.assetId);
-      if (!asset) continue;
+        // Calculate total duration from all clips
+        const totalDuration = Math.max(
+          ...clips.map(c => c.start + c.duration),
+          0.1
+        );
 
-      inputs.push('-i', asset.path);
-      const idx = inputIndex++;
+        // Build FFmpeg filter_complex
+        const inputs = [];
+        const filterParts = [];
+        let inputIndex = 0;
 
-      // Apply trim and scale
-      const inPoint = clip.inPoint || 0;
-      const outPoint = clip.outPoint || asset.duration;
-      const trimDuration = outPoint - inPoint;
+        // Create black background
+        filterParts.push(`color=black:s=${settings.width}x${settings.height}:d=${totalDuration}:r=${settings.fps}[base]`);
+        let lastVideo = 'base';
 
-      let clipFilter = `[${idx}:v]`;
+        // Process video clips
+        const videoInputMap = [];
+        for (const clip of videoClips) {
+          const asset = session.assets.get(clip.assetId);
+          if (!asset) continue;
 
-      // Trim
-      clipFilter += `trim=${inPoint}:${outPoint},setpts=PTS-STARTPTS,`;
+          inputs.push('-i', asset.path);
+          const idx = inputIndex++;
+          videoInputMap.push({ clip, asset, idx });
 
-      // Scale/fit to canvas
-      clipFilter += `scale=${settings.width}:${settings.height}:force_original_aspect_ratio=decrease,`;
-      clipFilter += `pad=${settings.width}:${settings.height}:(ow-iw)/2:(oh-ih)/2`;
+          const inPoint = clip.inPoint || 0;
+          const outPoint = clip.outPoint || asset.duration;
+          const trimDuration = outPoint - inPoint;
 
-      // Apply transform if present
-      if (clip.transform) {
-        const { x = 0, y = 0, scale = 1, opacity = 1 } = clip.transform;
-        if (scale !== 1) {
-          clipFilter += `,scale=iw*${scale}:ih*${scale}`;
+          let clipFilter = `[${idx}:v]`;
+          clipFilter += `trim=${inPoint}:${outPoint},setpts=PTS-STARTPTS,`;
+          clipFilter += `scale=${settings.width}:${settings.height}:force_original_aspect_ratio=decrease,`;
+          clipFilter += `pad=${settings.width}:${settings.height}:(ow-iw)/2:(oh-ih)/2`;
+
+          if (clip.transform) {
+            const { scale = 1 } = clip.transform;
+            if (scale !== 1) {
+              clipFilter += `,scale=iw*${scale}:ih*${scale}`;
+            }
+          }
+
+          // Pad start to align with timeline position
+          if (clip.start > 0) {
+            clipFilter += `,tpad=start_duration=${clip.start}`;
+          }
+
+          clipFilter += `[v${idx}]`;
+          filterParts.push(clipFilter);
+
+          const overlayX = clip.transform?.x || `(W-w)/2`;
+          const overlayY = clip.transform?.y || `(H-h)/2`;
+          const enable = `between(t,${clip.start},${clip.start + trimDuration})`;
+
+          filterParts.push(`[${lastVideo}][v${idx}]overlay=x=${overlayX}:y=${overlayY}:enable='${enable}':eof_action=pass[out${idx}]`);
+          lastVideo = `out${idx}`;
         }
-        // Opacity is handled in overlay
+
+        filterParts.push(`[${lastVideo}]copy[vout]`);
+
+        // --- Audio processing ---
+        const allAudioLabels = [];
+        let audioLabelIdx = 0;
+
+        job.statusMessage = 'Probing audio streams...';
+        job.progress = 5;
+
+        // Extract audio from video clips
+        for (const { clip, asset, idx } of videoInputMap) {
+          if (asset.type !== 'video') continue;
+
+          let hasAudio = false;
+          try {
+            hasAudio = await hasAudioStream(asset.path);
+          } catch (e) { /* skip */ }
+          if (!hasAudio) continue;
+
+          const inPoint = clip.inPoint || 0;
+          const outPoint = clip.outPoint || asset.duration;
+          const delayMs = Math.floor(clip.start * 1000);
+          const label = `au${audioLabelIdx++}`;
+
+          filterParts.push(
+            `[${idx}:a]atrim=${inPoint}:${outPoint},asetpts=PTS-STARTPTS,adelay=${delayMs}|${delayMs}[${label}]`
+          );
+          allAudioLabels.push(`[${label}]`);
+        }
+
+        // Process dedicated audio track clips (A1, A2)
+        for (const clip of audioClips) {
+          const asset = session.assets.get(clip.assetId);
+          if (!asset) continue;
+
+          inputs.push('-i', asset.path);
+          const idx = inputIndex++;
+          const inPoint = clip.inPoint || 0;
+          const outPoint = clip.outPoint || asset.duration;
+          const delayMs = Math.floor(clip.start * 1000);
+          const label = `au${audioLabelIdx++}`;
+
+          filterParts.push(
+            `[${idx}:a]atrim=${inPoint}:${outPoint},asetpts=PTS-STARTPTS,adelay=${delayMs}|${delayMs}[${label}]`
+          );
+          allAudioLabels.push(`[${label}]`);
+        }
+
+        // Mix all audio sources
+        let audioFilter = '';
+        if (allAudioLabels.length === 1) {
+          filterParts.push(`${allAudioLabels[0]}acopy[aout]`);
+          audioFilter = '-map [aout]';
+        } else if (allAudioLabels.length > 1) {
+          filterParts.push(`${allAudioLabels.join('')}amix=inputs=${allAudioLabels.length}:duration=longest[aout]`);
+          audioFilter = '-map [aout]';
+        }
+
+        // Build final command
+        const now = new Date();
+        const pad = (n) => String(n).padStart(2, '0');
+        const renderFilename = `${pad(now.getDate())}${pad(now.getMonth() + 1)}${now.getFullYear()}-${pad(now.getHours())}${pad(now.getMinutes())}-Rendered.mp4`;
+        const outputPath = join(session.rendersDir, isPreview ? 'preview.mp4' : renderFilename);
+
+        const ffmpegArgs = [
+          '-y',
+          ...inputs,
+          '-filter_complex', filterParts.join(';'),
+          '-map', '[vout]',
+        ];
+
+        if (audioFilter) {
+          ffmpegArgs.push('-map', '[aout]');
+        }
+
+        if (isPreview) {
+          ffmpegArgs.push('-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '28');
+        } else {
+          ffmpegArgs.push('-c:v', 'libx264', '-preset', 'medium', '-crf', '18');
+        }
+
+        ffmpegArgs.push('-c:a', 'aac', '-b:a', '192k');
+        ffmpegArgs.push('-movflags', '+faststart');
+        ffmpegArgs.push('-t', totalDuration.toString());
+        ffmpegArgs.push(outputPath);
+
+        console.log(`[${jobId}] FFmpeg render command prepared`);
+        console.log(`[${jobId}] Video clips: ${videoClips.length}, Audio clips: ${audioClips.length}, Audio sources (incl. embedded): ${allAudioLabels.length}`);
+        console.log(`[${jobId}] Total duration: ${totalDuration.toFixed(2)}s`);
+        console.log(`[${jobId}] Output: ${outputPath}`);
+        console.log(`[${jobId}] Filter complexity: ${filterParts.length} filters, ${inputs.length / 2} inputs`);
+
+        job.statusMessage = 'Encoding video...';
+        job.progress = 8;
+
+        // Run FFmpeg with progress callback
+        await runFFmpeg(ffmpegArgs, jobId, (encodedSeconds) => {
+          // Map encoded time to 8-95% range (8% for prep, 95% before finalize)
+          const pct = Math.min(95, 8 + (encodedSeconds / totalDuration) * 87);
+          job.progress = Math.round(pct);
+          job.statusMessage = `Encoding video... ${Math.round(encodedSeconds)}s / ${Math.round(totalDuration)}s`;
+
+          // ETA calculation
+          const elapsed = (Date.now() - job.startTime) / 1000;
+          if (pct > 10) {
+            const totalEst = elapsed / (pct / 100);
+            job.etaSeconds = Math.max(0, Math.round(totalEst - elapsed));
+          }
+        });
+
+        job.progress = 96;
+        job.statusMessage = 'Finalizing...';
+
+        const { stat } = await import('fs/promises');
+        const outputStats = await stat(outputPath);
+
+        if (outputStats.size < 10000) {
+          console.warn(`[${jobId}] WARNING: Output file is suspiciously small (${outputStats.size} bytes)`);
+        }
+
+        console.log(`[${jobId}] Render complete: ${(outputStats.size / 1024 / 1024).toFixed(1)} MB`);
+        console.log(`[${jobId}] === RENDER COMPLETE ===\n`);
+
+        // Add rendered video as an asset so it appears in the asset library
+        let renderAsset = null;
+        if (!isPreview) {
+          try {
+            const renderAssetId = randomUUID();
+            const assetExt = '.mp4';
+            const assetPath = join(session.assetsDir, renderAssetId + assetExt);
+            copyFileSync(outputPath, assetPath);
+
+            const thumbPath = join(session.assetsDir, renderAssetId + '-thumb.jpg');
+            try {
+              await generateThumbnail(assetPath, thumbPath, false);
+            } catch (e) {
+              console.warn(`[${jobId}] Render asset thumbnail failed:`, e.message);
+            }
+
+            const asset = {
+              id: renderAssetId,
+              type: 'video',
+              filename: renderFilename,
+              path: assetPath,
+              thumbPath: existsSync(thumbPath) ? thumbPath : null,
+              duration: totalDuration,
+              size: outputStats.size,
+              width: null,
+              height: null,
+              createdAt: Date.now(),
+            };
+
+            session.assets.set(renderAssetId, asset);
+            saveAssetMetadata(session);
+            console.log(`[${jobId}] Render added as asset: ${renderAssetId}`);
+
+            renderAsset = {
+              id: renderAssetId,
+              type: 'video',
+              filename: renderFilename,
+              duration: totalDuration,
+              size: outputStats.size,
+              thumbnailUrl: asset.thumbPath ? `/session/${sessionId}/assets/${renderAssetId}/thumbnail` : null,
+            };
+          } catch (e) {
+            console.warn(`[${jobId}] Failed to add render as asset:`, e.message);
+          }
+        }
+
+        job.status = 'completed';
+        job.progress = 100;
+        job.statusMessage = 'Export complete';
+        job.etaSeconds = 0;
+        job.downloadUrl = `/session/${sessionId}/renders/${isPreview ? 'preview' : 'export'}`;
+        job.filePath = outputPath;
+        job.size = outputStats.size;
+        job.duration = totalDuration;
+        job.renderAsset = renderAsset;
+
+      } catch (error) {
+        console.error(`[${jobId}] Render error:`, error.message);
+        job.status = 'failed';
+        job.progress = 0;
+        job.statusMessage = error.message;
+        job.error = error.message;
       }
-
-      clipFilter += `[v${idx}]`;
-      filterParts.push(clipFilter);
-
-      // Overlay onto base
-      const overlayX = clip.transform?.x || `(W-w)/2`;
-      const overlayY = clip.transform?.y || `(H-h)/2`;
-      const enable = `between(t,${clip.start},${clip.start + trimDuration})`;
-
-      filterParts.push(`[${lastVideo}][v${idx}]overlay=x=${overlayX}:y=${overlayY}:enable='${enable}'[out${idx}]`);
-      lastVideo = `out${idx}`;
-    }
-
-    // Rename final output
-    filterParts.push(`[${lastVideo}]copy[vout]`);
-
-    // Audio mixing
-    let audioFilter = '';
-    if (audioClips.length > 0) {
-      const audioInputs = [];
-      for (const clip of audioClips) {
-        const asset = session.assets.get(clip.assetId);
-        if (!asset) continue;
-
-        inputs.push('-i', asset.path);
-        const idx = inputIndex++;
-        const inPoint = clip.inPoint || 0;
-        const outPoint = clip.outPoint || asset.duration;
-
-        audioInputs.push(`[${idx}:a]atrim=${inPoint}:${outPoint},asetpts=PTS-STARTPTS,adelay=${Math.floor(clip.start * 1000)}|${Math.floor(clip.start * 1000)}[a${idx}]`);
-      }
-
-      if (audioInputs.length > 0) {
-        filterParts.push(...audioInputs);
-        const audioMix = audioInputs.map((_, i) => `[a${clips.indexOf(audioClips[i]) + videoClips.length}]`).join('');
-        filterParts.push(`${audioMix}amix=inputs=${audioInputs.length}[aout]`);
-        audioFilter = '-map [aout]';
-      }
-    }
-
-    // Build final command
-    const outputPath = join(session.rendersDir, isPreview ? 'preview.mp4' : `export-${Date.now()}.mp4`);
-
-    const ffmpegArgs = [
-      '-y',
-      ...inputs,
-      '-filter_complex', filterParts.join(';'),
-      '-map', '[vout]',
-    ];
-
-    if (audioFilter) {
-      ffmpegArgs.push('-map', '[aout]');
-    }
-
-    // Encoding settings
-    if (isPreview) {
-      ffmpegArgs.push('-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '28');
-    } else {
-      ffmpegArgs.push('-c:v', 'libx264', '-preset', 'medium', '-crf', '18');
-    }
-
-    ffmpegArgs.push('-c:a', 'aac', '-b:a', '192k');
-    ffmpegArgs.push('-movflags', '+faststart');
-    ffmpegArgs.push('-t', totalDuration.toString());
-    ffmpegArgs.push(outputPath);
-
-    console.log(`[${sessionId}] FFmpeg render command prepared`);
-
-    await runFFmpeg(ffmpegArgs, sessionId);
-
-    const { stat } = await import('fs/promises');
-    const outputStats = await stat(outputPath);
-
-    console.log(`[${sessionId}] Render complete: ${(outputStats.size / 1024 / 1024).toFixed(1)} MB`);
-    console.log(`[${sessionId}] === RENDER COMPLETE ===\n`);
-
-    res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-    res.end(JSON.stringify({
-      success: true,
-      path: outputPath,
-      size: outputStats.size,
-      duration: totalDuration,
-      downloadUrl: `/session/${sessionId}/renders/${isPreview ? 'preview' : 'export'}`,
-    }));
+    })();
 
   } catch (error) {
-    console.error(`[${sessionId}] Render error:`, error.message);
+    console.error(`[${sessionId}] Render setup error:`, error.message);
     res.writeHead(500, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
     res.end(JSON.stringify({ error: error.message }));
   }
@@ -2097,9 +2246,9 @@ async function handleRenderDownload(req, res, sessionId, renderType) {
   if (renderType === 'preview') {
     renderFile = files.find(f => f === 'preview.mp4');
   } else {
-    // Get most recent export
+    // Get most recent rendered file (DDMMYYYY-HHMM-Rendered.mp4)
     renderFile = files
-      .filter(f => f.startsWith('export-'))
+      .filter(f => f.endsWith('-Rendered.mp4'))
       .sort()
       .pop();
   }
@@ -2114,7 +2263,7 @@ async function handleRenderDownload(req, res, sessionId, renderType) {
   const { stat } = await import('fs/promises');
   const stats = await stat(renderPath);
 
-  const filename = renderType === 'preview' ? 'preview.mp4' : `${session.originalName.replace(/\.[^.]+$/, '')}-export.mp4`;
+  const filename = renderType === 'preview' ? 'preview.mp4' : renderFile;
 
   res.writeHead(200, {
     'Content-Type': 'video/mp4',
@@ -7404,6 +7553,646 @@ async function checkFastConcatCompatibility(session, clips) {
   return true;
 }
 
+// ============================================================
+// USE TEMPLATE — Intelligent Auto-Edit
+// ============================================================
+async function handleUseTemplate(req, res, sessionId) {
+  const session = getSession(sessionId);
+  if (!session) {
+    res.writeHead(404, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+    res.end(JSON.stringify({ error: 'Session not found' }));
+    return;
+  }
+
+  const body = await parseBody(req);
+  const { assetId } = body;
+
+  if (!assetId) {
+    res.writeHead(400, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+    res.end(JSON.stringify({ error: 'assetId is required' }));
+    return;
+  }
+
+  const videoAsset = session.assets.get(assetId);
+  if (!videoAsset) {
+    res.writeHead(404, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+    res.end(JSON.stringify({ error: 'Asset not found' }));
+    return;
+  }
+
+  const geminiKey = process.env.GEMINI_API_KEY;
+  if (!geminiKey) {
+    res.writeHead(400, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+    res.end(JSON.stringify({ error: 'GEMINI_API_KEY not configured' }));
+    return;
+  }
+
+  // Get video duration
+  let videoDuration = videoAsset.duration || 0;
+  if (!videoDuration) {
+    try {
+      const probeResult = await runFFmpegProbe(
+        ['-v', 'error', '-show_entries', 'format=duration', '-of', 'default=noprint_wrappers=1:nokey=1', videoAsset.path],
+        'use-template-probe'
+      );
+      videoDuration = parseFloat(probeResult.trim()) || 0;
+    } catch (e) {
+      console.error('[use-template] Failed to get video duration:', e.message);
+    }
+  }
+
+  if (videoDuration < 120) {
+    res.writeHead(400, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+    res.end(JSON.stringify({ error: 'Video is too short for auto-edit. Please use a video that is at least 2 minutes long.' }));
+    return;
+  }
+
+  // Create async job
+  const jobId = randomUUID();
+  const job = {
+    id: jobId,
+    status: 'processing',
+    progress: 0,
+    etaSeconds: 0,
+    startTime: Date.now(),
+    statusMessage: 'Starting auto-edit...',
+  };
+  jobs.set(jobId, job);
+
+  res.writeHead(202, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+  res.end(JSON.stringify({ jobId }));
+
+  // Helper to update progress
+  const updateProgress = (progress, statusMessage) => {
+    job.progress = progress;
+    job.statusMessage = statusMessage;
+    const elapsed = (Date.now() - job.startTime) / 1000;
+    if (progress > 5) {
+      const totalEst = elapsed / (progress / 100);
+      job.etaSeconds = Math.max(0, Math.round(totalEst - elapsed));
+    }
+    console.log(`[${jobId}] ${progress}% - ${statusMessage}`);
+  };
+
+  // Background processing
+  (async () => {
+    try {
+      console.log(`\n[${jobId}] === AUTO-EDIT (USE TEMPLATE) ===`);
+      console.log(`[${jobId}] Asset: ${videoAsset.filename} (${videoDuration.toFixed(1)}s)`);
+
+      // ── Step B: Scene Detection ──
+      updateProgress(2, 'Detecting scene changes...');
+
+      let sceneTimestamps = [0];
+      try {
+        const sceneStderr = await runFFmpeg([
+          '-i', videoAsset.path,
+          '-vf', "select='gt(scene,0.3)',showinfo",
+          '-vsync', 'vfr',
+          '-f', 'null',
+          process.platform === 'win32' ? 'NUL' : '/dev/null'
+        ], jobId);
+
+        const ptsMatches = sceneStderr.matchAll(/pts_time:([\d.]+)/g);
+        for (const match of ptsMatches) {
+          const t = parseFloat(match[1]);
+          if (t > 0 && t < videoDuration) {
+            sceneTimestamps.push(t);
+          }
+        }
+      } catch (sceneErr) {
+        console.log(`[${jobId}] Scene detection failed: ${sceneErr.message}`);
+      }
+
+      sceneTimestamps.push(videoDuration);
+      // Remove duplicates and sort
+      sceneTimestamps = [...new Set(sceneTimestamps)].sort((a, b) => a - b);
+
+      // Merge very short scenes (<2s) with their next neighbor
+      const mergedTimestamps = [sceneTimestamps[0]];
+      for (let i = 1; i < sceneTimestamps.length; i++) {
+        const duration = sceneTimestamps[i] - mergedTimestamps[mergedTimestamps.length - 1];
+        if (duration >= 2 || i === sceneTimestamps.length - 1) {
+          mergedTimestamps.push(sceneTimestamps[i]);
+        }
+      }
+      sceneTimestamps = mergedTimestamps;
+
+      // Build scenes array
+      const scenes = [];
+      for (let i = 0; i < sceneTimestamps.length - 1; i++) {
+        scenes.push({
+          index: i,
+          start: sceneTimestamps[i],
+          end: sceneTimestamps[i + 1],
+          duration: sceneTimestamps[i + 1] - sceneTimestamps[i],
+        });
+      }
+
+      // If no scenes detected, create uniform segments
+      if (scenes.length === 0) {
+        const segmentDuration = 30;
+        for (let t = 0; t < videoDuration; t += segmentDuration) {
+          scenes.push({
+            index: scenes.length,
+            start: t,
+            end: Math.min(t + segmentDuration, videoDuration),
+            duration: Math.min(segmentDuration, videoDuration - t),
+          });
+        }
+      }
+
+      console.log(`[${jobId}] Found ${scenes.length} scenes`);
+      updateProgress(10, `Found ${scenes.length} scenes`);
+
+      // ── Step C: Extract Representative Frames ──
+      updateProgress(12, 'Extracting frames...');
+
+      const maxFrames = 80;
+      let framesToExtract = scenes;
+      if (scenes.length > maxFrames) {
+        // Sample evenly
+        const step = scenes.length / maxFrames;
+        framesToExtract = [];
+        for (let i = 0; i < maxFrames; i++) {
+          framesToExtract.push(scenes[Math.floor(i * step)]);
+        }
+      }
+
+      const framesDir = join(session.assetsDir, `autocut-frames-${jobId}`);
+      mkdirSync(framesDir, { recursive: true });
+
+      const frameBase64s = [];
+      for (let i = 0; i < framesToExtract.length; i++) {
+        const scene = framesToExtract[i];
+        const frameTime = scene.start + Math.min(0.5, scene.duration / 2);
+        const framePath = join(framesDir, `frame_${i}.jpg`);
+
+        try {
+          await runFFmpeg([
+            '-ss', frameTime.toFixed(2),
+            '-i', videoAsset.path,
+            '-vframes', '1',
+            '-q:v', '5',
+            '-y',
+            framePath
+          ], jobId);
+
+          if (existsSync(framePath)) {
+            const frameBuffer = readFileSync(framePath);
+            frameBase64s.push({
+              index: scene.index,
+              timestamp: scene.start,
+              base64: frameBuffer.toString('base64'),
+            });
+          }
+        } catch (frameErr) {
+          console.log(`[${jobId}] Frame ${i} extraction failed: ${frameErr.message}`);
+        }
+
+        if (i % 10 === 0 || i === framesToExtract.length - 1) {
+          updateProgress(
+            Math.round(10 + (i / framesToExtract.length) * 10),
+            `Extracting frames (${i + 1}/${framesToExtract.length})...`
+          );
+        }
+      }
+
+      console.log(`[${jobId}] Extracted ${frameBase64s.length} frames`);
+      updateProgress(20, `Extracted ${frameBase64s.length} frames`);
+
+      // ── Step D: Transcribe Audio ──
+      updateProgress(22, 'Transcribing audio...');
+
+      let transcriptChunks = [];
+      try {
+        const transcription = await getOrTranscribeVideo(session, videoAsset, jobId);
+        if (transcription && transcription.words && transcription.words.length > 0) {
+          // Condense words into timestamped chunks (~10 words each)
+          const words = transcription.words;
+          const chunkSize = 10;
+          for (let i = 0; i < words.length; i += chunkSize) {
+            const chunk = words.slice(i, i + chunkSize);
+            const startTime = chunk[0].start;
+            const endTime = chunk[chunk.length - 1].end;
+            const text = chunk.map(w => w.text).join(' ');
+            transcriptChunks.push(`[${formatTimestamp(startTime)}-${formatTimestamp(endTime)}] "${text}"`);
+          }
+          console.log(`[${jobId}] Transcription complete: ${words.length} words, ${transcriptChunks.length} chunks`);
+        }
+      } catch (transcribeErr) {
+        console.log(`[${jobId}] Transcription failed (proceeding with frames only): ${transcribeErr.message}`);
+      }
+
+      updateProgress(35, transcriptChunks.length > 0 ? 'Transcription complete' : 'Proceeding without transcript');
+
+      // ── Step E: Gemini Pass 1 — Content Understanding ──
+      updateProgress(37, 'AI analyzing content...');
+
+      const ai = new GoogleGenAI({ apiKey: geminiKey });
+
+      // Build frame parts for Gemini
+      const frameParts = [];
+      for (const frame of frameBase64s) {
+        frameParts.push({ text: `[Frame ${frame.index} at ${formatTimestamp(frame.timestamp)}]` });
+        frameParts.push({ inlineData: { mimeType: 'image/jpeg', data: frame.base64 } });
+      }
+
+      const transcriptSection = transcriptChunks.length > 0
+        ? `\n\nTRANSCRIPT:\n${transcriptChunks.join('\n')}`
+        : '\n\n(No transcript available — analyze based on visuals only)';
+
+      const pass1Prompt = `You are a professional viral video editor analyzing raw footage.
+
+I'm providing ${frameBase64s.length} frames extracted from a ${formatTimestamp(videoDuration)} video (${videoDuration.toFixed(0)}s total).${transcriptSection}
+
+Analyze this footage and provide:
+1. "content_type": What kind of video is this? (e.g., "restoration", "cooking tutorial", "travel vlog", "product review", "event highlight", "DIY project", "fitness routine")
+2. "narrative_arc": What is the story structure? (e.g., "before → process → after", "problem → solution", "journey chronological", "tutorial steps")
+3. "key_moments": Array of objects with { "frameIndex": number, "timestamp": number, "description": string, "why_compelling": string } — list the most compelling/shareable moments
+4. "repetitive_sections": Array of objects with { "startFrameIndex": number, "endFrameIndex": number, "activity": string, "suggestedSpeed": number } — sections with repetitive manual work that benefit from timelapse
+5. "hook_candidates": Array of { "frameIndex": number, "reason": string } — which moments would make the best opening hook (first 3 seconds)
+6. "climax_candidates": Array of { "frameIndex": number, "reason": string } — the most satisfying payoff / reveal moments
+7. "skip_sections": Array of { "startFrameIndex": number, "endFrameIndex": number, "reason": string } — boring parts (dead time, setup, transitions with no value)
+8. "pacing_recommendation": string describing how the edit should feel
+
+Return valid JSON only.`;
+
+      let contentAnalysis = {};
+      try {
+        const pass1Response = await ai.models.generateContent({
+          model: 'gemini-2.5-flash',
+          contents: [{
+            role: 'user',
+            parts: [...frameParts, { text: pass1Prompt }],
+          }],
+          config: { responseMimeType: 'application/json' },
+        });
+
+        let pass1Text = '';
+        if (typeof pass1Response.text === 'function') {
+          pass1Text = await pass1Response.text();
+        } else if (pass1Response.text) {
+          pass1Text = pass1Response.text;
+        } else if (pass1Response.candidates?.[0]?.content?.parts?.[0]?.text) {
+          pass1Text = pass1Response.candidates[0].content.parts[0].text;
+        }
+
+        try {
+          contentAnalysis = JSON.parse(pass1Text);
+        } catch {
+          const match = (pass1Text || '').match(/\{[\s\S]*\}/);
+          contentAnalysis = match ? JSON.parse(match[0]) : {};
+        }
+        console.log(`[${jobId}] Pass 1 complete: content_type=${contentAnalysis.content_type || 'unknown'}`);
+      } catch (pass1Err) {
+        console.error(`[${jobId}] Gemini Pass 1 failed:`, pass1Err.message);
+        // Create minimal fallback analysis
+        contentAnalysis = {
+          content_type: 'unknown',
+          narrative_arc: 'chronological',
+          key_moments: [],
+          repetitive_sections: [],
+          hook_candidates: [],
+          climax_candidates: [],
+          skip_sections: [],
+          pacing_recommendation: 'Create a 60-120 second highlight reel from the best moments',
+        };
+      }
+
+      updateProgress(50, 'Content analysis complete');
+
+      // ── Step F: Gemini Pass 2 — Edit Decisions ──
+      updateProgress(52, 'AI building edit decisions...');
+
+      const sceneList = scenes.map((s, i) =>
+        `Scene ${i}: ${formatTimestamp(s.start)} - ${formatTimestamp(s.end)} (${s.duration.toFixed(1)}s)`
+      ).join('\n');
+
+      const pass2Prompt = `You are a professional viral video editor creating a 60-120 second edit.
+
+CONTENT ANALYSIS:
+${JSON.stringify(contentAnalysis, null, 2)}
+
+DETECTED SCENES:
+${sceneList}
+(Total: ${videoDuration.toFixed(0)}s across ${scenes.length} scenes)
+
+Rules for a great viral edit:
+- Total output MUST be between 60-120 seconds. Calculate carefully.
+- First 3 seconds must hook the viewer — use the most dramatic, satisfying, or surprising moment
+- Pacing: vary the rhythm. Mix quick cuts with longer moments. Don't make every clip the same length.
+- Repetitive work (sanding, painting, cooking same steps) → timelapse at 4x-32x speed depending on source length
+- Keep the most visually interesting angle of each activity, skip redundant angles of the same thing
+- Preserve key audio moments — don't cut mid-sentence on important dialogue
+- End with the most satisfying payoff moment (reveal, reaction, finished result)
+- Skip: dead air, walking between areas, phone checking, long setup/cleanup, blurry or poorly lit footage
+
+For EACH scene that should be INCLUDED (not skipped), provide:
+- "sceneIndex": number (matching the scene list above)
+- "action": "keep" (normal speed) or "timelapse" (speed up)
+- "speed": 1 for keep, 4-32 for timelapse
+- "importance": 1-10
+- "trimStart": optional seconds from scene start to trim the beginning (default 0)
+- "trimEnd": optional seconds from scene start for the trim end point (default: scene duration)
+- "position": "hook" (opening), "middle", or "climax" (ending)
+- "reason": brief explanation
+
+Omit scenes that should be skipped entirely.
+
+IMPORTANT: Calculate your total output duration. For each kept scene:
+- keep: (trimEnd - trimStart) seconds
+- timelapse: (trimEnd - trimStart) / speed seconds
+Sum must be 60-120 seconds. Show your calculation in "durationCalc".
+
+Return JSON: { "editDecisions": [...], "estimatedDuration": number, "editingNotes": "brief summary", "durationCalc": "your math" }`;
+
+      let editDecisions = [];
+      let estimatedDuration = 0;
+      let editingNotes = '';
+      try {
+        const pass2Response = await ai.models.generateContent({
+          model: 'gemini-2.5-flash',
+          contents: [{
+            role: 'user',
+            parts: [{ text: pass2Prompt }],
+          }],
+          config: { responseMimeType: 'application/json' },
+        });
+
+        let pass2Text = '';
+        if (typeof pass2Response.text === 'function') {
+          pass2Text = await pass2Response.text();
+        } else if (pass2Response.text) {
+          pass2Text = pass2Response.text;
+        } else if (pass2Response.candidates?.[0]?.content?.parts?.[0]?.text) {
+          pass2Text = pass2Response.candidates[0].content.parts[0].text;
+        }
+
+        let pass2Result;
+        try {
+          pass2Result = JSON.parse(pass2Text);
+        } catch {
+          const match = (pass2Text || '').match(/\{[\s\S]*\}/);
+          pass2Result = match ? JSON.parse(match[0]) : { editDecisions: [] };
+        }
+
+        editDecisions = pass2Result.editDecisions || [];
+        estimatedDuration = pass2Result.estimatedDuration || 0;
+        editingNotes = pass2Result.editingNotes || '';
+        console.log(`[${jobId}] Pass 2 complete: ${editDecisions.length} decisions, est. ${estimatedDuration.toFixed(1)}s`);
+        if (pass2Result.durationCalc) {
+          console.log(`[${jobId}] Duration calc: ${pass2Result.durationCalc}`);
+        }
+      } catch (pass2Err) {
+        console.error(`[${jobId}] Gemini Pass 2 failed:`, pass2Err.message);
+        job.status = 'failed';
+        job.error = `AI edit decision generation failed: ${pass2Err.message}`;
+        return;
+      }
+
+      if (editDecisions.length === 0) {
+        job.status = 'failed';
+        job.error = 'AI returned no edit decisions. Please try again.';
+        return;
+      }
+
+      updateProgress(65, `Edit plan ready — ${editDecisions.length} segments to process`);
+
+      // ── Step G: Create Timelapse Assets ──
+      const timelapseDecisions = editDecisions.filter(d => d.action === 'timelapse' && d.speed > 1);
+      console.log(`[${jobId}] Creating ${timelapseDecisions.length} timelapse segments...`);
+
+      // Build atempo filter chain for a given speed
+      const buildAtempoChain = (speed) => {
+        const filters = [];
+        let remaining = speed;
+        while (remaining > 2) {
+          filters.push('atempo=2.0');
+          remaining /= 2;
+        }
+        if (remaining > 1.01) {
+          filters.push(`atempo=${remaining.toFixed(4)}`);
+        }
+        return filters.length > 0 ? filters.join(',') : 'atempo=1.0';
+      };
+
+      for (let i = 0; i < editDecisions.length; i++) {
+        const decision = editDecisions[i];
+        const scene = scenes[decision.sceneIndex];
+        if (!scene) {
+          console.log(`[${jobId}] Warning: scene index ${decision.sceneIndex} out of range, skipping`);
+          continue;
+        }
+
+        const trimStart = (decision.trimStart || 0);
+        const trimEnd = decision.trimEnd != null ? decision.trimEnd : scene.duration;
+        const sourceStart = scene.start + trimStart;
+        const sourceDuration = trimEnd - trimStart;
+
+        if (decision.action === 'timelapse' && decision.speed > 1) {
+          updateProgress(
+            Math.round(65 + ((i + 1) / editDecisions.length) * 28),
+            `Rendering timelapse ${timelapseDecisions.indexOf(decision) + 1}/${timelapseDecisions.length}...`
+          );
+
+          const tlAssetId = randomUUID();
+          const tlOutputPath = join(session.assetsDir, `${tlAssetId}.mp4`);
+          const tlThumbPath = join(session.assetsDir, `${tlAssetId}_thumb.jpg`);
+          const speed = Math.min(Math.max(decision.speed, 2), 64); // Clamp 2-64x
+
+          const atempoChain = buildAtempoChain(speed);
+
+          try {
+            // Check if source has audio
+            let hasAudio = false;
+            try {
+              const audioProbe = await runFFmpegProbe(
+                ['-v', 'error', '-select_streams', 'a:0', '-show_entries', 'stream=codec_type', '-of', 'csv=p=0', videoAsset.path],
+                jobId
+              );
+              hasAudio = audioProbe.trim().length > 0;
+            } catch { /* no audio */ }
+
+            const ffmpegArgs = [
+              '-y',
+              '-ss', sourceStart.toFixed(3),
+              '-t', sourceDuration.toFixed(3),
+              '-i', videoAsset.path,
+              '-filter:v', `setpts=PTS/${speed.toFixed(2)}`,
+            ];
+            if (hasAudio) {
+              ffmpegArgs.push('-filter:a', atempoChain);
+            } else {
+              ffmpegArgs.push('-an');
+            }
+            ffmpegArgs.push(
+              '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '18',
+            );
+            if (hasAudio) {
+              ffmpegArgs.push('-c:a', 'aac', '-b:a', '192k');
+            }
+            ffmpegArgs.push(tlOutputPath);
+
+            await runFFmpeg(ffmpegArgs, jobId);
+
+            // Get actual duration
+            let tlDuration = sourceDuration / speed;
+            try {
+              const durStr = await runFFmpegProbe(
+                ['-v', 'error', '-show_entries', 'format=duration', '-of', 'default=noprint_wrappers=1:nokey=1', tlOutputPath],
+                jobId
+              );
+              tlDuration = parseFloat(durStr.trim()) || tlDuration;
+            } catch { /* use calculated */ }
+
+            // Generate thumbnail
+            try {
+              await runFFmpeg([
+                '-y', '-i', tlOutputPath,
+                '-vf', 'scale=160:90:force_original_aspect_ratio=decrease,pad=160:90:(ow-iw)/2:(oh-ih)/2',
+                '-frames:v', '1',
+                tlThumbPath
+              ], jobId);
+            } catch { /* thumbnail optional */ }
+
+            // Register new asset
+            const stats = statSync(tlOutputPath);
+            const tlAsset = {
+              id: tlAssetId,
+              type: 'video',
+              filename: `timelapse-${speed}x-${scene.index}-${videoAsset.filename}`,
+              path: tlOutputPath,
+              thumbPath: existsSync(tlThumbPath) ? tlThumbPath : null,
+              duration: tlDuration,
+              size: stats.size,
+              width: videoAsset.width || 1920,
+              height: videoAsset.height || 1080,
+              createdAt: Date.now(),
+              sourceAssetId: assetId,
+            };
+            session.assets.set(tlAssetId, tlAsset);
+
+            decision.assetId = tlAssetId;
+            decision.clipInPoint = 0;
+            decision.clipOutPoint = tlDuration;
+            decision.clipDuration = tlDuration;
+
+            console.log(`[${jobId}] Timelapse created: ${tlAssetId} (${tlDuration.toFixed(1)}s from ${sourceDuration.toFixed(1)}s at ${speed}x)`);
+          } catch (tlErr) {
+            console.error(`[${jobId}] Timelapse render failed for scene ${decision.sceneIndex}:`, tlErr.message);
+            // Fallback: use original footage at normal speed
+            decision.action = 'keep';
+            decision.speed = 1;
+            decision.assetId = assetId;
+            decision.clipInPoint = sourceStart;
+            decision.clipOutPoint = sourceStart + sourceDuration;
+            decision.clipDuration = sourceDuration;
+          }
+        } else if (decision.action === 'keep') {
+          // Keep at normal speed — use original asset with in/out points
+          decision.assetId = assetId;
+          decision.clipInPoint = sourceStart;
+          decision.clipOutPoint = sourceStart + sourceDuration;
+          decision.clipDuration = sourceDuration;
+        }
+      }
+
+      // ── Step H: Assemble & Respond ──
+      updateProgress(95, 'Assembling final edit...');
+
+      // Sort: hook first, then middle in chronological order, then climax
+      const hookDecisions = editDecisions.filter(d => d.position === 'hook');
+      const middleDecisions = editDecisions.filter(d => d.position === 'middle' || !d.position);
+      const climaxDecisions = editDecisions.filter(d => d.position === 'climax');
+
+      // Sort middle by scene index (chronological)
+      middleDecisions.sort((a, b) => a.sceneIndex - b.sceneIndex);
+
+      const sortedDecisions = [...hookDecisions, ...middleDecisions, ...climaxDecisions];
+
+      // Filter out any decisions that failed to process (no assetId)
+      const validDecisions = sortedDecisions.filter(d => d.assetId && d.clipDuration > 0);
+
+      const totalDuration = validDecisions.reduce((sum, d) => sum + d.clipDuration, 0);
+
+      // Build new assets list for response
+      const newAssets = [];
+      for (const d of validDecisions) {
+        if (d.assetId !== assetId) {
+          const asset = session.assets.get(d.assetId);
+          if (asset) {
+            newAssets.push({
+              id: asset.id,
+              filename: asset.filename,
+              duration: asset.duration,
+              streamUrl: `/session/${sessionId}/assets/${asset.id}/stream`,
+              thumbnailUrl: `/session/${sessionId}/assets/${asset.id}/thumbnail`,
+            });
+          }
+        }
+      }
+
+      console.log(`[${jobId}] === AUTO-EDIT COMPLETE ===`);
+      console.log(`[${jobId}] Output: ${validDecisions.length} clips, ${totalDuration.toFixed(1)}s total`);
+      console.log(`[${jobId}] Content type: ${contentAnalysis.content_type || 'unknown'}`);
+
+      // Cleanup frames directory
+      try {
+        const { rmSync } = await import('fs');
+        rmSync(framesDir, { recursive: true, force: true });
+      } catch { /* cleanup optional */ }
+
+      job.status = 'completed';
+      job.progress = 100;
+      job.statusMessage = 'Auto-edit complete!';
+      job.result = {
+        editDecisions: validDecisions.map(d => ({
+          sceneIndex: d.sceneIndex,
+          sourceStart: scenes[d.sceneIndex]?.start || 0,
+          sourceEnd: scenes[d.sceneIndex]?.end || 0,
+          action: d.action,
+          speed: d.speed || 1,
+          assetId: d.assetId,
+          clipInPoint: d.clipInPoint,
+          clipOutPoint: d.clipOutPoint,
+          clipDuration: d.clipDuration,
+          position: d.position || 'middle',
+          reason: d.reason || '',
+        })),
+        newAssets,
+        contentAnalysis: {
+          content_type: contentAnalysis.content_type || 'unknown',
+          narrative_arc: contentAnalysis.narrative_arc || 'unknown',
+          pacing_recommendation: contentAnalysis.pacing_recommendation || '',
+        },
+        totalDuration,
+        editingNotes,
+      };
+
+    } catch (err) {
+      console.error(`[${jobId}] Auto-edit failed:`, err.message);
+      job.status = 'failed';
+      job.error = err.message;
+    }
+  })();
+}
+
+// Generic job progress handler (works for merge, use-template, etc.)
+async function handleJobProgress(req, res, sessionId) {
+  const url = new URL(req.url, `http://localhost:${PORT}`);
+  const pathParts = url.pathname.split('/');
+  const jobId = pathParts[pathParts.length - 1];
+  const job = jobs.get(jobId);
+  if (!job) {
+    res.writeHead(404, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+    res.end(JSON.stringify({ error: 'Job not found' }));
+    return;
+  }
+  res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+  res.end(JSON.stringify(job));
+}
+
 // Get job progress
 async function handleMergeProgress(req, res, sessionId) {
   const url = new URL(req.url, `http://localhost:${PORT}`);
@@ -7885,6 +8674,14 @@ const server = http.createServer(async (req, res) => {
     }
     else if (req.method === 'POST' && action === 'giphy/add') {
       await handleGiphyAdd(req, res, sessionId);
+    }
+    // Auto-edit (Use Template)
+    else if (req.method === 'POST' && action === 'use-template') {
+      await handleUseTemplate(req, res, sessionId);
+    }
+    // Generic job progress polling
+    else if (req.method === 'GET' && action.startsWith('job-progress/')) {
+      await handleJobProgress(req, res, sessionId);
     }
     else if (action.startsWith('renders/')) {
       const renderType = action.substring(8); // Remove 'renders/'
