@@ -380,7 +380,7 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(({
                 }
               }}
               src={layer.url}
-              className={`absolute inset-0 w-full h-full ${videoFitClass} cursor-grab active:cursor-grabbing ${isSelected ? 'ring-2 ring-orange-500 ring-offset-2 ring-offset-black' : ''
+              className={`absolute inset-0 w-full h-full ${videoFitClass} cursor-grab active:cursor-grabbing ${isSelected ? 'ring-2 ring-teal-500 ring-offset-2 ring-offset-black' : ''
                 }`}
               style={styles}
               playsInline
@@ -431,7 +431,7 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(({
                 />
                 {/* Selection indicator */}
                 {isSelected && (
-                  <div className="absolute inset-0 ring-2 ring-orange-500 rounded-lg pointer-events-none" />
+                  <div className="absolute inset-0 ring-2 ring-teal-500 rounded-lg pointer-events-none" />
                 )}
                 {/* Drag handle indicator */}
                 {!isDragging && (
@@ -518,7 +518,7 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(({
 
       {/* Dragging indicator */}
       {draggingLayer && (
-        <div className="absolute bottom-3 left-3 text-xs text-orange-400 bg-black/70 px-2 py-1 rounded z-50">
+        <div className="absolute bottom-3 left-3 text-xs text-teal-400 bg-black/70 px-2 py-1 rounded z-50">
           Dragging...
         </div>
       )}

@@ -456,6 +456,81 @@ function calculateKeepSegments(silencePeriods, totalDuration, minSegmentDuration
   return keepSegments;
 }
 
+// Validate and sanitize Gemini-generated scene data
+function validateAndSanitizeScenes(sceneData, jobId = 'unknown') {
+  const VALID_TYPES = new Set([
+    'title', 'steps', 'features', 'stats', 'text', 'transition',
+    'media', 'chart', 'countdown', 'comparison', 'shapes', 'emoji', 'gif', 'lottie', '3d'
+  ]);
+
+  if (!sceneData) {
+    throw new Error('Invalid scene data: null or undefined');
+  }
+
+  // Handle cases where Gemini returns scenes directly as an array
+  if (Array.isArray(sceneData)) {
+    sceneData = { scenes: sceneData };
+  }
+
+  // Handle cases where scenes are nested under a different key
+  if (!sceneData.scenes && sceneData.animation?.scenes) {
+    sceneData.scenes = sceneData.animation.scenes;
+  }
+
+  // If still no scenes array, try to find any array property that looks like scenes
+  if (!Array.isArray(sceneData.scenes)) {
+    for (const key of Object.keys(sceneData)) {
+      if (Array.isArray(sceneData[key]) && sceneData[key].length > 0 && sceneData[key][0]?.type) {
+        console.log(`[${jobId}] Found scenes under key '${key}' instead of 'scenes'`);
+        sceneData.scenes = sceneData[key];
+        break;
+      }
+    }
+  }
+
+  if (!Array.isArray(sceneData.scenes)) {
+    console.error(`[${jobId}] Scene data keys: ${Object.keys(sceneData).join(', ')}`);
+    console.error(`[${jobId}] Scene data preview: ${JSON.stringify(sceneData).substring(0, 500)}`);
+    throw new Error('Invalid scene data: missing scenes array');
+  }
+
+  const originalCount = sceneData.scenes.length;
+
+  // Filter out invalid scene types
+  sceneData.scenes = sceneData.scenes.filter(scene => {
+    if (!scene.type || !VALID_TYPES.has(scene.type)) {
+      console.log(`[${jobId}] Removing invalid scene type: ${scene.type}`);
+      return false;
+    }
+    return true;
+  });
+
+  // Sanitize each scene
+  for (const scene of sceneData.scenes) {
+    scene.id = scene.id || `scene-${Math.random().toString(36).slice(2, 8)}`;
+    scene.duration = Math.max(1, Math.round(scene.duration || 60));
+    scene.content = scene.content || {};
+
+    // Cap transition duration to half of scene duration
+    if (scene.transition?.duration) {
+      scene.transition.duration = Math.min(scene.transition.duration, Math.floor(scene.duration / 2));
+    }
+  }
+
+  // Recalculate total duration
+  sceneData.totalDuration = sceneData.scenes.reduce((sum, s) => sum + s.duration, 0);
+
+  if (sceneData.scenes.length === 0) {
+    throw new Error('No valid scenes after validation');
+  }
+
+  if (sceneData.scenes.length !== originalCount) {
+    console.log(`[${jobId}] Scene validation: ${originalCount} -> ${sceneData.scenes.length} scenes`);
+  }
+
+  return sceneData;
+}
+
 // Remove dead air from video
 async function handleRemoveDeadAir(req, res) {
   const jobId = randomUUID();
@@ -3783,29 +3858,62 @@ async function handleRenderMotionGraphic(req, res, sessionId) {
     console.log(`[${jobId}] Template: ${templateId}`);
     console.log(`[${jobId}] Duration: ${duration}s`);
 
-    // Get text and styling from props
-    const text = props.text || props.name || templateId;
-    const color = (props.color || props.primaryColor || '#ffffff').replace('#', '');
-    const bgColor = props.backgroundColor || '000000';
-    const fontSize = props.fontSize || 64;
+    // Render using Remotion CLI with the TemplateRender composition
+    const durationInFrames = Math.round(duration * fps);
+    const propsPath = join(session.dir, `${jobId}-template-props.json`);
+    const templateRenderProps = {
+      templateId,
+      templateProps: props,
+      durationInFrames,
+    };
+    writeFileSync(propsPath, JSON.stringify(templateRenderProps, null, 2));
+    console.log(`[${jobId}] Props written to ${propsPath}`);
 
-    // Create a video with text overlay using FFmpeg
-    // This is a placeholder - proper Remotion rendering would generate much nicer animations
-    const fontFile = '/System/Library/Fonts/Helvetica.ttc'; // macOS system font
+    console.log(`[${jobId}] Rendering with Remotion (TemplateRender)...`);
 
-    // FFmpeg command to create a video with text
-    const ffmpegArgs = [
-      '-y',
-      '-f', 'lavfi',
-      '-i', `color=c=0x${bgColor}:s=${width}x${height}:d=${duration}:r=${fps}`,
-      '-vf', `drawtext=text='${text.replace(/'/g, "\\'")}':fontfile=${fontFile}:fontsize=${fontSize}:fontcolor=0x${color}:x=(w-text_w)/2:y=(h-text_h)/2`,
-      '-c:v', 'libx264',
-      '-pix_fmt', 'yuv420p',
-      '-preset', 'fast',
-      outputPath
+    const remotionArgs = [
+      'remotion', 'render',
+      'src/remotion/index.tsx',
+      'TemplateRender',
+      outputPath,
+      '--props', propsPath,
+      '--frames', `0-${durationInFrames - 1}`,
+      '--fps', String(fps),
+      '--width', String(width),
+      '--height', String(height),
+      '--codec', 'h264',
+      '--overwrite',
+      '--gl=angle',
     ];
 
-    await runFFmpeg(ffmpegArgs, jobId);
+    await new Promise((resolve, reject) => {
+      const npxCmd = process.platform === 'win32' ? 'npx.cmd' : 'npx';
+      const proc = spawn(npxCmd, remotionArgs, {
+        cwd: process.cwd(),
+        stdio: ['pipe', 'pipe', 'pipe'],
+      });
+
+      let stderr = '';
+      proc.stderr.on('data', (data) => {
+        stderr += data.toString();
+        console.log(`[${jobId}] Remotion: ${data.toString().trim()}`);
+      });
+
+      proc.on('close', (code) => {
+        if (code === 0) {
+          resolve();
+        } else {
+          reject(new Error(`Remotion render failed with code ${code}: ${stderr}`));
+        }
+      });
+
+      proc.on('error', (err) => {
+        reject(new Error(`Failed to start Remotion: ${err.message}`));
+      });
+    });
+
+    // Clean up props file
+    try { unlinkSync(propsPath); } catch (e) { /* ignore */ }
 
     // Generate thumbnail
     await runFFmpeg([
@@ -4246,6 +4354,7 @@ ${attachedAssetIds?.length ? `- IMPORTANT: Include media scenes to showcase the 
         .replace(/```\n?/g, '')
         .trim();
       sceneData = JSON.parse(cleanedResponse);
+      sceneData = validateAndSanitizeScenes(sceneData, jobId);
     } catch (parseError) {
       console.error(`[${jobId}] Failed to parse Gemini response:`, parseError);
       throw new Error('Failed to parse AI-generated scene data');
@@ -4467,7 +4576,8 @@ ${attachedAssetIds?.length ? `- IMPORTANT: Include media scenes to showcase the 
     ];
 
     await new Promise((resolve, reject) => {
-      const proc = spawn('npx', remotionArgs, {
+      const npxCmd = process.platform === 'win32' ? 'npx.cmd' : 'npx';
+      const proc = spawn(npxCmd, remotionArgs, {
         cwd: process.cwd(),
         stdio: ['pipe', 'pipe', 'pipe'],
       });
@@ -4885,7 +4995,8 @@ Return ONLY the complete JSON structure with your minimal change applied. No mar
     ];
 
     await new Promise((resolve, reject) => {
-      const proc = spawn('npx', remotionArgs, {
+      const npxCmd = process.platform === 'win32' ? 'npx.cmd' : 'npx';
+      const proc = spawn(npxCmd, remotionArgs, {
         cwd: process.cwd(),
         stdio: ['pipe', 'pipe', 'pipe'],
       });
@@ -5996,6 +6107,7 @@ Make it visually engaging with good color choices. Use 2-4 scenes for variety.`
         const sceneText = sceneResult.candidates[0].content.parts[0].text;
         const cleanedScene = sceneText.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
         sceneData = JSON.parse(cleanedScene);
+        sceneData = validateAndSanitizeScenes(sceneData, jobId);
       } catch (parseError) {
         console.error(`[${jobId}] Failed to parse scene data for animation ${i + 1}, using fallback`);
         // Create a simple fallback animation
@@ -6396,6 +6508,7 @@ Feel free to add a GIF scene for reactions or emphasis when appropriate!`;
         .replace(/```\n?/g, '')
         .trim();
       sceneData = JSON.parse(cleanedResponse);
+      sceneData = validateAndSanitizeScenes(sceneData, jobId);
     } catch (parseError) {
       console.error(`[${jobId}] Failed to parse Gemini response:`, parseError);
       throw new Error('Failed to parse AI-generated scene data');
@@ -6587,7 +6700,8 @@ async function handleRenderFromConcept(req, res, sessionId) {
     console.log(`[${jobId}] Remotion command: npx ${remotionArgs.join(' ')}`);
 
     await new Promise((resolve, reject) => {
-      const proc = spawn('npx', remotionArgs, {
+      const npxCmd = process.platform === 'win32' ? 'npx.cmd' : 'npx';
+      const proc = spawn(npxCmd, remotionArgs, {
         cwd: process.cwd(),
         stdio: ['pipe', 'pipe', 'pipe'],
       });
@@ -6947,7 +7061,8 @@ Pick phrases that are spread throughout the video. Each phrase should be 2-6 wor
     console.log(`[${jobId}] Remotion command: npx ${remotionArgs.join(' ')}`);
 
     await new Promise((resolve, reject) => {
-      const proc = spawn('npx', remotionArgs, {
+      const npxCmd = process.platform === 'win32' ? 'npx.cmd' : 'npx';
+      const proc = spawn(npxCmd, remotionArgs, {
         cwd: process.cwd(),
         stdio: ['pipe', 'pipe', 'pipe'],
       });
@@ -7252,6 +7367,7 @@ Use specific terms, concepts, and themes from the transcript.`;
         .replace(/```\n?/g, '')
         .trim();
       sceneData = JSON.parse(cleanedResponse);
+      sceneData = validateAndSanitizeScenes(sceneData, jobId);
     } catch (parseError) {
       console.error(`[${jobId}] Failed to parse Gemini response:`, parseError);
       throw new Error('Failed to parse AI-generated scene data');
@@ -7297,7 +7413,8 @@ Use specific terms, concepts, and themes from the transcript.`;
     ];
 
     await new Promise((resolve, reject) => {
-      const proc = spawn('npx', remotionArgs, {
+      const npxCmd = process.platform === 'win32' ? 'npx.cmd' : 'npx';
+      const proc = spawn(npxCmd, remotionArgs, {
         cwd: process.cwd(),
         stdio: ['pipe', 'pipe', 'pipe'],
       });

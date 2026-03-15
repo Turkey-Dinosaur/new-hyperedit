@@ -2455,7 +2455,7 @@ export default function AIPromptPanel({
       {/* Header */}
       <div className="p-4 border-b border-zinc-800/50">
         <div className="flex items-center gap-2 mb-2">
-          <div className="w-8 h-8 bg-gradient-to-br from-orange-500 to-amber-500 rounded-lg flex items-center justify-center">
+          <div className="w-8 h-8 bg-gradient-to-br from-teal-500 to-cyan-500 rounded-lg flex items-center justify-center">
             <Sparkles className="w-4 h-4" />
           </div>
           <h2 className="font-semibold">HyperEdit AI</h2>
@@ -2501,18 +2501,18 @@ export default function AIPromptPanel({
 
       {/* Processing overlay */}
       {(isApplying || isProcessing) && (
-        <div className="p-4 bg-orange-500/10 border-b border-orange-500/20">
+        <div className="p-4 bg-teal-500/10 border-b border-teal-500/20">
           <div className="flex items-center gap-3">
-            <Loader2 className="w-5 h-5 text-orange-400 animate-spin" />
+            <Loader2 className="w-5 h-5 text-teal-400 animate-spin" />
             <div className="flex-1">
-              <p className="text-sm text-orange-200 font-medium">
+              <p className="text-sm text-teal-200 font-medium">
                 {processingStatus || applyStatus || 'Processing video...'}
               </p>
               {(applyProgress ?? 0) > 0 && (
                 <>
                   <div className="mt-2 h-2 bg-zinc-800 rounded-full overflow-hidden">
                     <div
-                      className="h-full bg-gradient-to-r from-orange-500 to-amber-500 transition-all duration-300"
+                      className="h-full bg-gradient-to-r from-teal-500 to-cyan-500 transition-all duration-300"
                       style={{ width: `${applyProgress}%` }}
                     />
                   </div>
@@ -2537,7 +2537,7 @@ export default function AIPromptPanel({
             <div key={idx} className="space-y-2">
               {message.type === 'user' ? (
                 <div className="flex justify-end">
-                  <div className="bg-gradient-to-r from-orange-500 to-amber-500 rounded-lg px-3 py-2 max-w-[85%]">
+                  <div className="bg-gradient-to-r from-teal-500 to-cyan-500 rounded-lg px-3 py-2 max-w-[85%]">
                     <p className="text-sm text-white">{message.text}</p>
                   </div>
                 </div>
@@ -2557,7 +2557,7 @@ export default function AIPromptPanel({
                           >
                             <span className="text-lg">{option.icon}</span>
                             <div className="flex-1 min-w-0">
-                              <div className="text-sm font-medium text-white group-hover:text-orange-400 transition-colors">
+                              <div className="text-sm font-medium text-white group-hover:text-teal-400 transition-colors">
                                 {option.label}
                               </div>
                               <div className="text-xs text-zinc-400 mt-0.5">
@@ -2593,7 +2593,7 @@ export default function AIPromptPanel({
 
                     {/* Processing indicator */}
                     {message.isProcessingGifs && (
-                      <div className="mt-2 flex items-center gap-2 text-xs text-orange-400">
+                      <div className="mt-2 flex items-center gap-2 text-xs text-teal-400">
                         <Loader2 className="w-3 h-3 animate-spin" />
                         <span>Processing...</span>
                       </div>
@@ -2653,7 +2653,7 @@ export default function AIPromptPanel({
                           <Terminal className="w-3 h-3" />
                           <span>FFmpeg Command</span>
                         </div>
-                        <div className="bg-zinc-900 rounded p-2 font-mono text-xs text-orange-400 overflow-x-auto">
+                        <div className="bg-zinc-900 rounded p-2 font-mono text-xs text-teal-400 overflow-x-auto">
                           {message.command}
                         </div>
                         {message.applied ? (
@@ -2665,7 +2665,7 @@ export default function AIPromptPanel({
                           <button
                             onClick={() => handleApplyEdit(message.command!, idx)}
                             disabled={isApplying || !hasVideo}
-                            className="w-full flex items-center justify-center gap-2 px-3 py-2 bg-gradient-to-r from-orange-500 to-amber-500 hover:from-orange-600 hover:to-amber-600 disabled:from-zinc-700 disabled:to-zinc-700 rounded-lg text-xs font-medium transition-all"
+                            className="w-full flex items-center justify-center gap-2 px-3 py-2 bg-gradient-to-r from-teal-500 to-cyan-500 hover:from-teal-600 hover:to-cyan-600 disabled:from-zinc-700 disabled:to-zinc-700 rounded-lg text-xs font-medium transition-all"
                           >
                             {isApplying ? (
                               <>
@@ -2691,7 +2691,7 @@ export default function AIPromptPanel({
         {isProcessing && (
           <div className="bg-zinc-800 rounded-lg p-3">
             <div className="flex items-center gap-2 text-sm text-zinc-400">
-              <div className="w-4 h-4 border-2 border-orange-500/20 border-t-orange-500 rounded-full animate-spin" />
+              <div className="w-4 h-4 border-2 border-teal-500/20 border-t-teal-500 rounded-full animate-spin" />
               <span>{processingStatus || 'Thinking...'}</span>
             </div>
           </div>
@@ -2759,7 +2759,7 @@ export default function AIPromptPanel({
           type="button"
           onClick={() => setShowMotionGraphicsModal(true)}
           disabled={!hasVideo || isProcessing}
-          className="w-full flex items-center justify-center gap-2 px-4 py-2.5 mb-2 rounded-lg text-sm font-medium transition-all bg-gradient-to-r from-orange-500/20 to-amber-500/20 hover:from-orange-500/30 hover:to-amber-500/30 text-orange-300 hover:text-orange-200 border border-orange-500/30 hover:border-orange-500/50 disabled:opacity-50 disabled:cursor-not-allowed"
+          className="w-full flex items-center justify-center gap-2 px-4 py-2.5 mb-2 rounded-lg text-sm font-medium transition-all bg-gradient-to-r from-teal-500/20 to-cyan-500/20 hover:from-teal-500/30 hover:to-cyan-500/30 text-teal-300 hover:text-teal-200 border border-teal-500/30 hover:border-teal-500/50 disabled:opacity-50 disabled:cursor-not-allowed"
         >
           <Wand2 className="w-4 h-4" />
           Motion Graphics
@@ -2772,7 +2772,7 @@ export default function AIPromptPanel({
             onClick={() => setShowQuickActions(!showQuickActions)}
             disabled={!hasVideo || isProcessing}
             className={`w-full flex items-center justify-center gap-2 px-4 py-2.5 rounded-lg text-sm font-medium transition-all ${showQuickActions
-              ? 'bg-orange-500/20 text-orange-400 ring-1 ring-orange-500/50'
+              ? 'bg-teal-500/20 text-teal-400 ring-1 ring-teal-500/50'
               : 'bg-zinc-800 hover:bg-zinc-700 text-zinc-300 disabled:opacity-50 disabled:cursor-not-allowed'
               }`}
           >
@@ -2795,7 +2795,7 @@ export default function AIPromptPanel({
                     }}
                     className="flex items-center gap-2 px-3 py-2.5 bg-zinc-700/50 hover:bg-zinc-700 rounded-lg text-xs text-left transition-colors group"
                   >
-                    <suggestion.icon className="w-4 h-4 text-zinc-400 group-hover:text-orange-400 transition-colors flex-shrink-0" />
+                    <suggestion.icon className="w-4 h-4 text-zinc-400 group-hover:text-teal-400 transition-colors flex-shrink-0" />
                     <span className="text-zinc-300 leading-tight">{suggestion.text}</span>
                   </button>
                 ))}
@@ -2825,7 +2825,7 @@ export default function AIPromptPanel({
             {selectedReferences.map((ref, idx) => (
               <div
                 key={idx}
-                className="flex items-center gap-1 px-2 py-1 bg-orange-500/20 text-orange-300 rounded-md text-xs"
+                className="flex items-center gap-1 px-2 py-1 bg-teal-500/20 text-teal-300 rounded-md text-xs"
               >
                 {ref.type === 'clip' && <Film className="w-3 h-3" />}
                 {ref.type === 'track' && <Type className="w-3 h-3" />}
@@ -2834,7 +2834,7 @@ export default function AIPromptPanel({
                 <button
                   type="button"
                   onClick={() => removeReference(idx)}
-                  className="ml-0.5 hover:text-orange-100"
+                  className="ml-0.5 hover:text-teal-100"
                 >
                   <X className="w-3 h-3" />
                 </button>
@@ -2861,7 +2861,7 @@ export default function AIPromptPanel({
         )}
 
         {/* Unified Input Container */}
-        <div className="bg-zinc-800 rounded-xl border border-zinc-700/50 focus-within:ring-2 focus-within:ring-orange-500/50 transition-all">
+        <div className="bg-zinc-800 rounded-xl border border-zinc-700/50 focus-within:ring-2 focus-within:ring-teal-500/50 transition-all">
           {/* Textarea */}
           <textarea
             value={prompt}
@@ -2888,7 +2888,7 @@ export default function AIPromptPanel({
                   onClick={() => setShowReferencePicker(!showReferencePicker)}
                   disabled={!hasVideo || isProcessing}
                   className={`p-1.5 rounded-md transition-all ${showReferencePicker
-                    ? 'bg-orange-500/20 text-orange-400'
+                    ? 'bg-teal-500/20 text-teal-400'
                     : 'hover:bg-zinc-700 text-zinc-400 hover:text-zinc-300 disabled:opacity-50'
                     }`}
                   title="Add asset from library"
@@ -2968,7 +2968,7 @@ export default function AIPromptPanel({
                                     {asset.type}
                                   </span>
                                   {asset.aiGenerated && (
-                                    <span className="text-[10px] px-1.5 py-0.5 rounded bg-orange-500/20 text-orange-300">
+                                    <span className="text-[10px] px-1.5 py-0.5 rounded bg-teal-500/20 text-teal-300">
                                       AI
                                     </span>
                                   )}
@@ -3050,7 +3050,7 @@ export default function AIPromptPanel({
                           value={timeRangeInputs.start}
                           onChange={(e) => setTimeRangeInputs(prev => ({ ...prev, start: e.target.value }))}
                           placeholder="0:00"
-                          className="flex-1 px-2 py-1.5 bg-zinc-700 border border-zinc-600 rounded text-xs text-white placeholder:text-zinc-500 focus:outline-none focus:ring-1 focus:ring-orange-500"
+                          className="flex-1 px-2 py-1.5 bg-zinc-700 border border-zinc-600 rounded text-xs text-white placeholder:text-zinc-500 focus:outline-none focus:ring-1 focus:ring-teal-500"
                         />
                       </div>
                       <div className="flex items-center gap-2">
@@ -3060,7 +3060,7 @@ export default function AIPromptPanel({
                           value={timeRangeInputs.end}
                           onChange={(e) => setTimeRangeInputs(prev => ({ ...prev, end: e.target.value }))}
                           placeholder="1:30"
-                          className="flex-1 px-2 py-1.5 bg-zinc-700 border border-zinc-600 rounded text-xs text-white placeholder:text-zinc-500 focus:outline-none focus:ring-1 focus:ring-orange-500"
+                          className="flex-1 px-2 py-1.5 bg-zinc-700 border border-zinc-600 rounded text-xs text-white placeholder:text-zinc-500 focus:outline-none focus:ring-1 focus:ring-teal-500"
                         />
                       </div>
                     </div>
@@ -3082,7 +3082,7 @@ export default function AIPromptPanel({
                       <button
                         type="button"
                         onClick={applyTimeRange}
-                        className="flex-1 px-2 py-1.5 bg-orange-500 hover:bg-orange-600 rounded text-xs text-white font-medium transition-colors"
+                        className="flex-1 px-2 py-1.5 bg-teal-500 hover:bg-teal-600 rounded text-xs text-white font-medium transition-colors"
                       >
                         Apply
                       </button>
@@ -3100,7 +3100,7 @@ export default function AIPromptPanel({
             <button
               type="submit"
               disabled={!prompt.trim() || isProcessing || !hasVideo}
-              className="w-8 h-8 bg-gradient-to-r from-orange-500 to-amber-500 disabled:from-zinc-700 disabled:to-zinc-700 rounded-lg flex items-center justify-center transition-all hover:shadow-lg hover:shadow-orange-500/50 disabled:shadow-none"
+              className="w-8 h-8 bg-gradient-to-r from-teal-500 to-cyan-500 disabled:from-zinc-700 disabled:to-zinc-700 rounded-lg flex items-center justify-center transition-all hover:shadow-lg hover:shadow-teal-500/50 disabled:shadow-none"
             >
               {isProcessing ? (
                 <div className="w-4 h-4 border-2 border-white/20 border-t-white rounded-full animate-spin" />

@@ -3312,7 +3312,7 @@ export const DynamicAnimation: React.FC<DynamicAnimationProps> = ({
         frameOffset += scene.duration;
 
         return (
-          <Sequence key={scene.id || index} from={from} durationInFrames={scene.duration}>
+          <Sequence key={scene.id || index} from={from} durationInFrames={scene.duration} premountFor={30}>
             <SceneRenderer scene={scene} />
           </Sequence>
         );

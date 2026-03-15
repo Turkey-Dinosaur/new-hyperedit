@@ -89,13 +89,13 @@ export default function ExportModal({
           {/* Rendering state */}
           {status === 'rendering' && (
             <div className="flex flex-col items-center py-6 gap-5">
-              <Loader2 className="w-8 h-8 text-orange-500 animate-spin" />
+              <Loader2 className="w-8 h-8 text-teal-500 animate-spin" />
 
               {/* Progress bar */}
               <div className="w-full space-y-2">
                 <div className="w-full h-2.5 bg-zinc-800 rounded-full overflow-hidden">
                   <div
-                    className="h-full bg-gradient-to-r from-orange-500 to-amber-500 rounded-full transition-all duration-500 ease-out"
+                    className="h-full bg-gradient-to-r from-teal-500 to-cyan-500 rounded-full transition-all duration-500 ease-out"
                     style={{ width: `${Math.max(progress, 1)}%` }}
                   />
                 </div>
@@ -143,7 +143,7 @@ export default function ExportModal({
               {/* Download button */}
               <button
                 onClick={handleDownload}
-                className="w-full flex items-center justify-center gap-2 px-4 py-3 bg-orange-500 hover:bg-orange-600 text-white font-medium rounded-lg transition-colors"
+                className="w-full flex items-center justify-center gap-2 px-4 py-3 bg-teal-500 hover:bg-teal-600 text-white font-medium rounded-lg transition-colors"
               >
                 <Download className="w-4 h-4" />
                 Download Video
@@ -162,7 +162,7 @@ export default function ExportModal({
                 {onRetry && (
                   <button
                     onClick={onRetry}
-                    className="px-4 py-2 bg-orange-500 hover:bg-orange-600 text-white text-sm font-medium rounded-lg transition-colors"
+                    className="px-4 py-2 bg-teal-500 hover:bg-teal-600 text-white text-sm font-medium rounded-lg transition-colors"
                   >
                     Try Again
                   </button>

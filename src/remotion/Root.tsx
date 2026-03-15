@@ -1,6 +1,7 @@
 import React from 'react';
 import { Composition } from 'remotion';
 import { DynamicAnimation } from './DynamicAnimation';
+import { TemplateRenderer, type TemplateRendererProps } from './TemplateRenderer';
 
 // Props passed from the CLI via --props
 export interface DynamicAnimationProps {
@@ -189,6 +190,22 @@ export const RemotionRoot: React.FC = () => {
           return {
             durationInFrames: calculateDuration(props),
           };
+        }}
+      />
+      <Composition
+        id="TemplateRender"
+        component={TemplateRenderer}
+        durationInFrames={90}
+        fps={30}
+        width={1920}
+        height={1080}
+        defaultProps={{
+          templateId: 'animated-text' as const,
+          templateProps: { text: 'Hello World' },
+        }}
+        calculateMetadata={({ props }) => {
+          const durationInFrames = (props as TemplateRendererProps & { durationInFrames?: number }).durationInFrames || 90;
+          return { durationInFrames };
         }}
       />
     </>
