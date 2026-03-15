@@ -20,6 +20,8 @@
     "@remotion/renderer": "4.0.434",
     "@remotion/shapes": "4.0.434",
     "@remotion/three": "4.0.434",
+    "@splinetool/react-spline": "^4.1.0",
+    "@splinetool/runtime": "^1.12.69",
     "@types/formidable": "^3.4.6",
     "@types/three": "^0.182.0",
     "formdata-node": "^6.0.3",

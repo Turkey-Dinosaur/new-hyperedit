@@ -104,9 +104,19 @@ export interface SessionInfo {
   createdAt: number;
 }
 
-// Helper to load session from localStorage
+// Helper to load session from URL param or localStorage
 function loadSessionFromStorage(): SessionInfo | null {
   try {
+    // Check URL query param first (?session=xxx)
+    const urlParams = new URLSearchParams(window.location.search);
+    const urlSessionId = urlParams.get('session');
+    if (urlSessionId) {
+      const sessionInfo: SessionInfo = { sessionId: urlSessionId, createdAt: Date.now() };
+      // Persist to localStorage so it works on refresh
+      localStorage.setItem(SESSION_STORAGE_KEY, JSON.stringify(sessionInfo));
+      return sessionInfo;
+    }
+
     const stored = localStorage.getItem(SESSION_STORAGE_KEY);
     if (stored) {
       return JSON.parse(stored);

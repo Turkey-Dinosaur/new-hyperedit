@@ -1,4 +1,5 @@
 import { useState, useCallback, useRef, useEffect, useMemo } from 'react';
+import { useNavigate } from 'react-router';
 import VideoPreview, { VideoPreviewHandle } from '@/react-app/components/VideoPreview';
 import Timeline from '@/react-app/components/Timeline';
 import AssetLibrary from '@/react-app/components/AssetLibrary';
@@ -24,6 +25,7 @@ interface ChapterData {
 }
 
 export default function Home() {
+  const navigate = useNavigate();
   const [selectedClipIds, setSelectedClipIds] = useState<string[]>([]);
   const [lastSelectedClipId, setLastSelectedClipId] = useState<string | null>(null);
   const [selectedAssetIds, setSelectedAssetIds] = useState<string[]>([]);
@@ -123,6 +125,13 @@ export default function Home() {
   useEffect(() => {
     checkServer();
   }, [checkServer]);
+
+  // Redirect to landing page if no session is available
+  useEffect(() => {
+    if (!loading && !session) {
+      navigate('/', { replace: true });
+    }
+  }, [loading, session, navigate]);
 
   const sessionLoadedRef = useRef<string | null>(null);
 
@@ -2364,7 +2373,7 @@ export default function Home() {
               />
             ) : clips.length > 0 ? (
               // Assets exist but playhead is not over any clip
-              <div className={`relative ${aspectRatio === '9:16' ? 'h-[65vh] w-auto aspect-[9/16]' : 'w-full max-w-4xl aspect-video'} bg-black rounded-xl overflow-hidden shadow-2xl ring-1 ring-white/10 flex items-center justify-center`}>
+              <div className={`relative ${aspectRatio === '9:16' ? 'aspect-[9/16]' : aspectRatio === 'auto' ? 'aspect-video' : 'aspect-video'} h-full w-auto max-w-full max-h-full bg-black rounded-xl overflow-hidden shadow-2xl ring-1 ring-white/10 flex items-center justify-center`}>
                 <div className="text-center text-zinc-600">
                   <div className="text-sm">No clip at playhead</div>
                   <div className="text-xs mt-1">Move playhead over a clip to preview</div>

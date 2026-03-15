@@ -62,10 +62,9 @@ function restoreSessionsFromDisk() {
     const assetsDir = join(sessionDir, 'assets');
     const rendersDir = join(sessionDir, 'renders');
 
-    // Skip if assets directory doesn't exist
+    // Create assets directory if it doesn't exist (for sessions created without uploads)
     if (!existsSync(assetsDir)) {
-      console.log(`[Session] Skipping ${sessionId} - no assets directory`);
-      continue;
+      mkdirSync(assetsDir, { recursive: true });
     }
 
     // Restore project state from disk if it exists
@@ -156,10 +155,18 @@ function restoreSessionsFromDisk() {
       }
     }
 
-    if (assets.size === 0) {
-      console.log(`[Session] Skipping ${sessionId} - no assets found`);
-      continue;
+    // Restore project name and timestamps from project.json
+    // Fallback: use first asset's original filename if no name is stored
+    let fallbackName = 'Untitled Project';
+    for (const [, asset] of assets) {
+      if (asset.filename) {
+        fallbackName = asset.filename.replace(/\.[^/.]+$/, ''); // Strip extension
+        break;
+      }
     }
+    const restoredName = projectState.name || fallbackName;
+    const restoredCreatedAt = projectState.createdAt || Date.now();
+    const restoredUpdatedAt = projectState.updatedAt || restoredCreatedAt;
 
     const session = {
       id: sessionId,
@@ -167,8 +174,9 @@ function restoreSessionsFromDisk() {
       assetsDir,
       rendersDir,
       currentVideo: join(sessionDir, 'current.mp4'), // Legacy
-      originalName: 'Restored Project',
-      createdAt: Date.now(),
+      originalName: restoredName,
+      createdAt: restoredCreatedAt,
+      updatedAt: restoredUpdatedAt,
       editCount: 0,
       assets,
       project: projectState,
@@ -228,8 +236,13 @@ function createSession(originalName) {
   mkdirSync(assetsDir, { recursive: true });
   mkdirSync(rendersDir, { recursive: true });
 
+  const now = Date.now();
+
   // Initialize project state with all 6 tracks
   const projectState = {
+    name: originalName,
+    createdAt: now,
+    updatedAt: now,
     tracks: [
       { id: 'T1', type: 'text', name: 'T1', order: 0 },    // Captions/text track (top)
       { id: 'V3', type: 'video', name: 'V3', order: 1 },   // Top overlay (B-roll)
@@ -253,7 +266,8 @@ function createSession(originalName) {
     rendersDir,
     currentVideo: join(sessionDir, 'current.mp4'), // Legacy support
     originalName,
-    createdAt: Date.now(),
+    createdAt: now,
+    updatedAt: now,
     editCount: 0,
     assets: new Map(), // assetId -> asset info
     project: projectState,
@@ -934,9 +948,24 @@ Only return the JSON, no other text.`
 // Create a new empty session (for multi-asset workflow)
 async function handleSessionCreate(req, res) {
   try {
-    const session = createSession('Untitled Project');
+    // Parse optional name from request body
+    let projectName = 'Untitled Project';
+    try {
+      let body = '';
+      for await (const chunk of req) body += chunk;
+      if (body) {
+        const data = JSON.parse(body);
+        if (data.name) projectName = data.name;
+      }
+    } catch { /* No body or invalid JSON — use default name */ }
 
-    console.log(`[${session.id}] Empty session created`);
+    const session = createSession(projectName);
+
+    // Save initial project.json to disk so it persists
+    const projectPath = join(session.dir, 'project.json');
+    writeFileSync(projectPath, JSON.stringify(session.project, null, 2));
+
+    console.log(`[${session.id}] Empty session created: "${projectName}"`);
 
     res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
     res.end(JSON.stringify({
@@ -1876,6 +1905,7 @@ function handleProjectGet(req, res, sessionId) {
 
   res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
   res.end(JSON.stringify({
+    name: session.project.name || session.originalName || 'Untitled Project',
     tracks: session.project.tracks,
     clips: session.project.clips,
     settings: session.project.settings,
@@ -1899,6 +1929,14 @@ async function handleProjectSave(req, res, sessionId) {
     if (data.tracks) session.project.tracks = data.tracks;
     if (data.clips) session.project.clips = data.clips;
     if (data.settings) session.project.settings = { ...session.project.settings, ...data.settings };
+    if (data.name) {
+      session.project.name = data.name;
+      session.originalName = data.name;
+    }
+
+    // Update timestamp
+    session.updatedAt = Date.now();
+    session.project.updatedAt = session.updatedAt;
 
     // Save to disk for persistence
     const projectPath = join(session.dir, 'project.json');
@@ -8508,6 +8546,73 @@ async function handleProcessAsset(req, res, sessionId) {
   }
 }
 
+// ============== SESSION LISTING & RENAME ==============
+
+// GET /sessions — list all sessions with metadata
+function handleSessionsList(req, res) {
+  const list = [];
+  for (const [id, session] of sessions) {
+    // Get first asset thumbnail for project preview
+    let thumbnail = null;
+    for (const [assetId, asset] of session.assets) {
+      if (asset.thumbPath && existsSync(asset.thumbPath)) {
+        thumbnail = `/session/${id}/assets/${assetId}/thumbnail`;
+        break;
+      }
+    }
+    list.push({
+      sessionId: id,
+      name: session.project.name || session.originalName || 'Untitled Project',
+      createdAt: session.createdAt,
+      updatedAt: session.updatedAt || session.createdAt,
+      assetCount: session.assets.size,
+      thumbnail,
+    });
+  }
+  // Sort by most recently updated
+  list.sort((a, b) => b.updatedAt - a.updatedAt);
+  res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+  res.end(JSON.stringify({ sessions: list }));
+}
+
+// PUT /session/{id}/name — rename a project
+async function handleSessionRename(req, res, sessionId) {
+  const session = getSession(sessionId);
+  if (!session) {
+    res.writeHead(404, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+    res.end(JSON.stringify({ error: 'Session not found' }));
+    return;
+  }
+
+  try {
+    let body = '';
+    for await (const chunk of req) body += chunk;
+    const data = JSON.parse(body);
+
+    if (!data.name) {
+      res.writeHead(400, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+      res.end(JSON.stringify({ error: 'Missing name field' }));
+      return;
+    }
+
+    session.originalName = data.name;
+    session.project.name = data.name;
+    session.updatedAt = Date.now();
+    session.project.updatedAt = session.updatedAt;
+
+    // Persist to disk
+    const projectPath = join(session.dir, 'project.json');
+    writeFileSync(projectPath, JSON.stringify(session.project, null, 2));
+
+    console.log(`[${sessionId}] Renamed to: "${data.name}"`);
+    res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+    res.end(JSON.stringify({ success: true }));
+  } catch (error) {
+    res.writeHead(500, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+    res.end(JSON.stringify({ error: error.message }));
+  }
+}
+
 // ============== SERVER ==============
 
 const server = http.createServer(async (req, res) => {
@@ -8561,6 +8666,8 @@ const server = http.createServer(async (req, res) => {
       await handleSessionChapters(req, res, sessionId);
     } else if (req.method === 'DELETE' && !action) {
       handleSessionDelete(req, res, sessionId);
+    } else if (req.method === 'PUT' && action === 'name') {
+      await handleSessionRename(req, res, sessionId);
     }
     // Multi-asset endpoints
     else if (req.method === 'POST' && action === 'assets') {
@@ -8706,6 +8813,8 @@ const server = http.createServer(async (req, res) => {
     await handleRemoveDeadAir(req, res);
   } else if (req.method === 'POST' && path === '/generate-chapters') {
     await handleGenerateChapters(req, res);
+  } else if (req.method === 'GET' && path === '/sessions') {
+    handleSessionsList(req, res);
   } else if (req.method === 'GET' && path === '/health') {
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ status: 'ok', ffmpeg: 'native', sessions: sessions.size }));

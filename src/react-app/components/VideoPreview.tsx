@@ -303,22 +303,26 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(({
 
   const isVertical = aspectRatio === '9:16';
 
-  // Container styling
+  // Container styling — always constrain to parent via max-w/max-h so the
+  // preview auto-fits the available space regardless of aspect ratio.
   const containerStyle: React.CSSProperties = {};
-  let containerClass = 'relative bg-black rounded-xl overflow-hidden shadow-2xl ring-1 ring-white/10 ';
+  let containerClass = 'relative bg-black rounded-xl overflow-hidden shadow-2xl ring-1 ring-white/10 max-w-full max-h-full ';
 
   if (aspectRatio === 'auto') {
-    containerClass += 'w-full max-w-4xl ';
     if (dynamicRatioString) {
       containerStyle.aspectRatio = dynamicRatioString;
     } else {
       containerClass += 'aspect-video'; // fallback
     }
   } else if (isVertical) {
-    containerClass += 'h-[65vh] w-auto aspect-[9/16]';
+    containerClass += 'aspect-[9/16]';
   } else {
-    containerClass += 'w-full max-w-4xl aspect-video';
+    containerClass += 'aspect-video';
   }
+
+  // Let the aspect ratio + max constraints determine size: use h-full so the
+  // container grows to fill available height, then aspect ratio sets width (or vice-versa).
+  containerClass += ' h-full w-auto';
 
   if (layers.length === 0) {
     return (

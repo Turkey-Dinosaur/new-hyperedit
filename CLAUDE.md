@@ -19,7 +19,7 @@ npm run knip             # Check for unused dependencies
 npm run cf-typegen       # Generate Cloudflare worker types
 ```
 
-**Local development** requires both `npm run dev` and `npm run ffmpeg-server` running simultaneously.
+**Local development** requires both `npm run dev` and `npm run ffmpeg-server` running simultaneously. Open `http://localhost:5173` in your browser. For first-time Windows setup, run `./setup-dev.ps1`.
 
 If a port is already in use (EADDRINUSE), kill it in PowerShell:
 ```powershell
@@ -149,6 +149,7 @@ Captions use local OpenAI Whisper (`scripts/whisper-transcribe.py`). Setup:
 pip install openai-whisper torch
 ```
 - **MPS (Apple GPU) is NOT supported** — Whisper's sparse tensors crash on MPS. The script runs on CPU only. Do not add `device="mps"`.
+- The server checks for both `python3` and `python` commands for Windows/Unix compatibility.
 - 3-tier fallback: local Whisper (free) → OpenAI Whisper API (requires `OPENAI_API_KEY`) → Gemini API (timestamps may drift on long audio).
 - The `base` model is used by default (good speed/accuracy balance).
 
