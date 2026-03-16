@@ -937,6 +937,12 @@ export default function AIPromptPanel({
     // CONTEXT-AWARE DECISIONS
     // ============================================
 
+    // Caption/subtitle requests always route to captions workflow (check before edit-animation)
+    if (lower.includes('caption') || lower.includes('subtitle') ||
+      lower.includes('transcribe') || lower.includes('transcription')) {
+      return 'captions';
+    }
+
     // If user has selected an AI animation clip on the main timeline and wants to edit it
     if (ctx.selectedClipIsAiAnimation && !ctx.isOnEditTab) {
       const isEditIntent = lower.includes('edit') || lower.includes('change') ||
@@ -985,12 +991,6 @@ export default function AIPromptPanel({
     // ============================================
     // INTENT-BASED DECISIONS (when not in edit tab)
     // ============================================
-
-    // Caption-related requests
-    if (lower.includes('caption') || lower.includes('subtitle') ||
-      lower.includes('transcribe') || lower.includes('transcription')) {
-      return 'captions';
-    }
 
     // Dead air / silence removal
     if (lower.includes('dead air') || lower.includes('silence') ||

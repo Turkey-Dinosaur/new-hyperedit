@@ -1648,23 +1648,35 @@ async function generateThumbnail(inputPath, outputPath, isImage = false) {
   }
 }
 
-// Get video/image dimensions and duration
+// Get video/image dimensions and duration (rotation-aware)
 async function getMediaInfo(inputPath) {
   try {
     const result = await runFFmpegProbe(
-      ['-v', 'error', '-select_streams', 'v:0', '-show_entries', 'stream=width,height', '-show_entries', 'format=duration', '-of', 'json', inputPath],
+      ['-v', 'error', '-select_streams', 'v:0',
+       '-show_entries', 'stream=width,height',
+       '-show_entries', 'stream_side_data=rotation',
+       '-show_entries', 'stream_tags=rotate',
+       '-show_entries', 'format=duration',
+       '-of', 'json', inputPath],
       'media-info'
     );
     console.log('[media-info] ffprobe raw output:', result);
     const info = JSON.parse(result);
     const stream = info.streams?.[0] || {};
     const duration = parseFloat(info.format?.duration) || 0;
-    console.log(`[media-info] Parsed: width=${stream.width}, height=${stream.height}, duration=${duration}`);
-    return {
-      width: stream.width || 0,
-      height: stream.height || 0,
-      duration,
-    };
+    let w = stream.width || 0;
+    let h = stream.height || 0;
+
+    // Check for rotation in side_data or tags — swap dimensions if rotated ±90°
+    const sideData = stream.side_data_list?.[0];
+    const rotation = Math.abs(parseInt(sideData?.rotation) || parseInt(stream.tags?.rotate) || 0);
+    if (rotation === 90 || rotation === 270) {
+      [w, h] = [h, w];
+      console.log(`[media-info] Rotation ${rotation}° detected, swapped to ${w}x${h}`);
+    }
+
+    console.log(`[media-info] Parsed: width=${w}, height=${h}, duration=${duration}`);
+    return { width: w, height: h, duration };
   } catch (e) {
     console.error('[media-info] ffprobe FAILED:', e.message);
     return { width: 0, height: 0, duration: 0 };
@@ -2004,6 +2016,7 @@ async function handleProjectSave(req, res, sessionId) {
     if (data.tracks) session.project.tracks = data.tracks;
     if (data.clips) session.project.clips = data.clips;
     if (data.settings) session.project.settings = { ...session.project.settings, ...data.settings };
+    if (data.captionData) session.project.captionData = data.captionData;
     if (data.name) {
       session.project.name = data.name;
       session.originalName = data.name;
@@ -2081,8 +2094,9 @@ async function handleProjectRender(req, res, sessionId) {
         job.progress = 2;
 
         // Sort clips by track for layering (V1 first, then V2, etc.)
+        // Exclude T1 caption clips (no asset) and audio-only clips
         const videoClips = clips
-          .filter(c => session.assets.get(c.assetId)?.type !== 'audio')
+          .filter(c => c.trackId !== 'T1' && c.assetId && session.assets.get(c.assetId)?.type !== 'audio')
           .sort((a, b) => {
             const trackOrder = { 'V1': 0, 'V2': 1, 'V3': 2 };
             return (trackOrder[a.trackId] || 0) - (trackOrder[b.trackId] || 0);
@@ -2090,6 +2104,10 @@ async function handleProjectRender(req, res, sessionId) {
 
         const audioClips = clips
           .filter(c => session.assets.get(c.assetId)?.type === 'audio');
+
+        // Caption clips on T1
+        const captionClips = clips.filter(c => c.trackId === 'T1');
+        const captionData = session.project.captionData || {};
 
         // Calculate total duration from all clips
         const totalDuration = Math.max(
@@ -2146,6 +2164,48 @@ async function handleProjectRender(req, res, sessionId) {
 
           filterParts.push(`[${lastVideo}][v${idx}]overlay=x=${overlayX}:y=${overlayY}:enable='${enable}':eof_action=pass[out${idx}]`);
           lastVideo = `out${idx}`;
+        }
+
+        // Burn captions (T1 clips) using drawtext
+        for (const clip of captionClips) {
+          const caption = captionData[clip.id];
+          if (!caption || !caption.words || caption.words.length === 0) continue;
+
+          const style = caption.style || {};
+          const text = caption.words.map(w => w.text).join(' ');
+          // Escape special chars for FFmpeg drawtext
+          const escapedText = text.replace(/'/g, "\u2019").replace(/:/g, "\\:").replace(/\\/g, "\\\\").replace(/%/g, "%%");
+
+          const fontSize = style.fontSize || 48;
+          const fontColor = style.color || 'white';
+          const fontFamily = style.fontFamily || 'Arial';
+          const strokeColor = style.strokeColor || 'black';
+          const strokeWidth = style.strokeWidth || 2;
+
+          // Position: bottom 8%, center, or top 8%
+          let yExpr;
+          if (style.position === 'top') {
+            yExpr = `h*0.08`;
+          } else if (style.position === 'center') {
+            yExpr = `(h-text_h)/2`;
+          } else {
+            yExpr = `h*0.92-text_h`;
+          }
+
+          // Apply transform offsets
+          const offsetX = clip.transform?.x || 0;
+          const offsetY = clip.transform?.y || 0;
+          const xExpr = `(w-text_w)/2+${offsetX}`;
+          const yFinal = `${yExpr}+${offsetY}`;
+
+          const enable = `between(t,${clip.start},${clip.start + clip.duration})`;
+          const labelIn = lastVideo;
+          const labelOut = `cap${clip.id.substring(0, 6)}`;
+
+          filterParts.push(
+            `[${labelIn}]drawtext=text='${escapedText}':fontsize=${fontSize}:fontcolor=${fontColor}:font='${fontFamily}':borderw=${strokeWidth}:bordercolor=${strokeColor}:x=${xExpr}:y=${yFinal}:enable='${enable}'[${labelOut}]`
+          );
+          lastVideo = labelOut;
         }
 
         filterParts.push(`[${lastVideo}]copy[vout]`);
@@ -3309,13 +3369,18 @@ async function handleTranscribe(req, res, sessionId) {
         const audioBase64 = audioBuffer.toString('base64');
         const ai = new GoogleGenAI({ apiKey: geminiKey });
 
-        const model = ai.getGenerativeModel({ model: 'gemini-2.5-flash' });
-        const result = await model.generateContent([
-          { inlineData: { mimeType: 'audio/mp3', data: audioBase64 } },
-          { text: `Transcribe this audio with word-level timestamps. Duration: ${totalDuration.toFixed(1)}s. Return JSON: {"text": "full text", "words": [{"text": "word", "start": 0.0, "end": 0.5}]}` }
-        ]);
+        const result = await ai.models.generateContent({
+          model: 'gemini-2.5-flash',
+          contents: [{
+            role: 'user',
+            parts: [
+              { inlineData: { mimeType: 'audio/mp3', data: audioBase64 } },
+              { text: `Transcribe this audio with word-level timestamps. Duration: ${totalDuration.toFixed(1)}s. Return JSON: {"text": "full text", "words": [{"text": "word", "start": 0.0, "end": 0.5}]}` }
+            ]
+          }],
+        });
 
-        const responseText = result.response.text();
+        const responseText = result.candidates?.[0]?.content?.parts?.[0]?.text || '';
         const jsonMatch = responseText.match(/\{[\s\S]*\}/);
         if (jsonMatch) {
           transcription = JSON.parse(jsonMatch[0]);
@@ -3887,10 +3952,10 @@ async function handleRenderMotionGraphic(req, res, sessionId) {
     ];
 
     await new Promise((resolve, reject) => {
-      const npxCmd = process.platform === 'win32' ? 'npx.cmd' : 'npx';
-      const proc = spawn(npxCmd, remotionArgs, {
+      const proc = spawn('npx', remotionArgs, {
         cwd: process.cwd(),
         stdio: ['pipe', 'pipe', 'pipe'],
+        shell: true,
       });
 
       let stderr = '';
@@ -4576,10 +4641,10 @@ ${attachedAssetIds?.length ? `- IMPORTANT: Include media scenes to showcase the 
     ];
 
     await new Promise((resolve, reject) => {
-      const npxCmd = process.platform === 'win32' ? 'npx.cmd' : 'npx';
-      const proc = spawn(npxCmd, remotionArgs, {
+      const proc = spawn('npx', remotionArgs, {
         cwd: process.cwd(),
         stdio: ['pipe', 'pipe', 'pipe'],
+        shell: true,
       });
 
       let stderr = '';
@@ -4995,10 +5060,10 @@ Return ONLY the complete JSON structure with your minimal change applied. No mar
     ];
 
     await new Promise((resolve, reject) => {
-      const npxCmd = process.platform === 'win32' ? 'npx.cmd' : 'npx';
-      const proc = spawn(npxCmd, remotionArgs, {
+      const proc = spawn('npx', remotionArgs, {
         cwd: process.cwd(),
         stdio: ['pipe', 'pipe', 'pipe'],
+        shell: true,
       });
 
       let stderr = '';
@@ -6363,49 +6428,55 @@ async function handleAnalyzeForAnimation(req, res, sessionId) {
       };
     };
 
-    if (hasLocalWhisper) {
-      try {
-        console.log(`[${jobId}]    Using local Whisper...`);
-        transcription = await runLocalWhisper(audioPath, jobId);
-      } catch (whisperError) {
-        console.log(`[${jobId}]    Local Whisper failed: ${whisperError.message}`);
-        console.log(`[${jobId}]    Falling back to Gemini...`);
+    // Transcription is optional context for animation generation — never block on failure
+    try {
+      if (hasLocalWhisper) {
+        try {
+          console.log(`[${jobId}]    Using local Whisper...`);
+          transcription = await runLocalWhisper(audioPath, jobId);
+        } catch (whisperError) {
+          console.log(`[${jobId}]    Local Whisper failed: ${whisperError.message}`);
+          console.log(`[${jobId}]    Falling back to Gemini...`);
+          transcription = await transcribeWithGemini();
+        }
+      } else if (openaiKey) {
+        console.log(`[${jobId}]    Using OpenAI Whisper API...`);
+        const FormData = (await import('node-fetch')).default.FormData || global.FormData;
+        const formData = new FormData();
+        formData.append('file', createReadStream(audioPath));
+        formData.append('model', 'whisper-1');
+        formData.append('response_format', 'verbose_json');
+        formData.append('timestamp_granularities[]', 'word');
+
+        const whisperResponse = await fetch('https://api.openai.com/v1/audio/transcriptions', {
+          method: 'POST',
+          headers: { 'Authorization': `Bearer ${openaiKey}` },
+          body: formData,
+        });
+
+        if (!whisperResponse.ok) {
+          throw new Error(`Whisper API error: ${whisperResponse.status}`);
+        }
+
+        const whisperResult = await whisperResponse.json();
+        transcription = {
+          text: whisperResult.text || '',
+          words: (whisperResult.words || []).map(w => ({
+            text: w.word,
+            start: w.start,
+            end: w.end,
+          })),
+        };
+      } else {
+        // Use Gemini as fallback
         transcription = await transcribeWithGemini();
       }
-    } else if (openaiKey) {
-      console.log(`[${jobId}]    Using OpenAI Whisper API...`);
-      const FormData = (await import('node-fetch')).default.FormData || global.FormData;
-      const formData = new FormData();
-      formData.append('file', createReadStream(audioPath));
-      formData.append('model', 'whisper-1');
-      formData.append('response_format', 'verbose_json');
-      formData.append('timestamp_granularities[]', 'word');
-
-      const whisperResponse = await fetch('https://api.openai.com/v1/audio/transcriptions', {
-        method: 'POST',
-        headers: { 'Authorization': `Bearer ${openaiKey}` },
-        body: formData,
-      });
-
-      if (!whisperResponse.ok) {
-        throw new Error(`Whisper API error: ${whisperResponse.status}`);
-      }
-
-      const whisperResult = await whisperResponse.json();
-      transcription = {
-        text: whisperResult.text || '',
-        words: (whisperResult.words || []).map(w => ({
-          text: w.word,
-          start: w.start,
-          end: w.end,
-        })),
-      };
-    } else {
-      // Use Gemini as fallback
-      transcription = await transcribeWithGemini();
+    } catch (transcriptionError) {
+      console.log(`[${jobId}]    Transcription failed (non-blocking): ${transcriptionError.message}`);
+      transcription = { text: '', words: [] };
     }
 
-    console.log(`[${jobId}] Transcription complete: ${transcription.text.substring(0, 100)}...`);
+    console.log(`[${jobId}] Transcription: ${transcription.text ? transcription.text.substring(0, 100) + '...' : '(empty — proceeding without transcript)'}`);
 
     // Clean up audio file
     try { unlinkSync(audioPath); } catch (e) { }
@@ -6700,10 +6771,10 @@ async function handleRenderFromConcept(req, res, sessionId) {
     console.log(`[${jobId}] Remotion command: npx ${remotionArgs.join(' ')}`);
 
     await new Promise((resolve, reject) => {
-      const npxCmd = process.platform === 'win32' ? 'npx.cmd' : 'npx';
-      const proc = spawn(npxCmd, remotionArgs, {
+      const proc = spawn('npx', remotionArgs, {
         cwd: process.cwd(),
         stdio: ['pipe', 'pipe', 'pipe'],
+        shell: true,
       });
 
       let stdout = '';
@@ -7061,10 +7132,10 @@ Pick phrases that are spread throughout the video. Each phrase should be 2-6 wor
     console.log(`[${jobId}] Remotion command: npx ${remotionArgs.join(' ')}`);
 
     await new Promise((resolve, reject) => {
-      const npxCmd = process.platform === 'win32' ? 'npx.cmd' : 'npx';
-      const proc = spawn(npxCmd, remotionArgs, {
+      const proc = spawn('npx', remotionArgs, {
         cwd: process.cwd(),
         stdio: ['pipe', 'pipe', 'pipe'],
+        shell: true,
       });
 
       proc.stdout.on('data', (data) => {
@@ -7413,10 +7484,10 @@ Use specific terms, concepts, and themes from the transcript.`;
     ];
 
     await new Promise((resolve, reject) => {
-      const npxCmd = process.platform === 'win32' ? 'npx.cmd' : 'npx';
-      const proc = spawn(npxCmd, remotionArgs, {
+      const proc = spawn('npx', remotionArgs, {
         cwd: process.cwd(),
         stdio: ['pipe', 'pipe', 'pipe'],
+        shell: true,
       });
 
       let stdout = '';
@@ -8399,6 +8470,21 @@ async function handleMergeAll(req, res, sessionId) {
         console.log(`\n[${jobId}] === BACKGROUND MERGE ===`);
         console.log(`[${jobId}] Optimization: ${canCopy ? 'FAST PATH (-c copy)' : 'RE-ENCODE PATH'}`);
 
+        // Detect target resolution from first valid clip (preserve source dimensions)
+        let targetW = 1920, targetH = 1080;
+        for (const clip of clips) {
+          const asset = session.assets.get(clip.assetId);
+          if (asset) {
+            const info = await getMediaInfo(asset.path);
+            if (info.width && info.height) {
+              targetW = info.width;
+              targetH = info.height;
+              console.log(`[${jobId}] Target resolution from first clip: ${targetW}x${targetH}`);
+            }
+            break;
+          }
+        }
+
         const args = ['-y'];
         let totalDuration = 0;
         let validClipsCount = 0;
@@ -8431,7 +8517,7 @@ async function handleMergeAll(req, res, sessionId) {
             const inPoint = clip.inPoint || 0;
             const duration = clip.duration || asset.duration;
             totalDuration += duration;
-            filterParts.push(`[${validClipsCount}:v]trim=start=${inPoint}:end=${inPoint + duration},setpts=PTS-STARTPTS,scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2[v${validClipsCount}]`);
+            filterParts.push(`[${validClipsCount}:v]trim=start=${inPoint}:end=${inPoint + duration},setpts=PTS-STARTPTS,scale=${targetW}:${targetH}:force_original_aspect_ratio=increase,crop=${targetW}:${targetH},setsar=1[v${validClipsCount}]`);
             videoStreams.push(`[v${validClipsCount}]`);
 
             // Only add audio filter if the input actually has an audio stream
@@ -8441,7 +8527,7 @@ async function handleMergeAll(req, res, sessionId) {
               hasAnyAudio = true;
             } else {
               // Generate silent audio for inputs without audio
-              filterParts.push(`anullsrc=r=44100:cl=stereo[silence${validClipsCount}];[silence${validClipsCount}]atrim=duration=${duration}[a${validClipsCount}]`);
+              filterParts.push(`aevalsrc=0:s=44100:d=${duration},aformat=sample_fmts=fltp:sample_rates=44100:channel_layouts=stereo[a${validClipsCount}]`);
             }
             audioStreams.push(`[a${validClipsCount}]`);
             validClipsCount++;
@@ -8508,10 +8594,12 @@ async function handleMergeAll(req, res, sessionId) {
 
         await runFFmpeg(['-y', '-i', outputPath, '-ss', '00:00:01.000', '-vframes', '1', '-vf', 'scale=320:-1', '-q:v', '2', thumbPath], jobId + '-thumb');
         const outputStats = statSync(outputPath);
+        const outputInfo = await getMediaInfo(outputPath);
         const mergedAsset = {
           id: newAssetId, type: 'video', filename: `Merged_Sequence_${Date.now()}.mp4`,
           path: outputPath, thumbPath: existsSync(thumbPath) ? thumbPath : null,
-          duration: totalDuration, size: outputStats.size, width: 1920, height: 1080,
+          duration: outputInfo.duration || totalDuration, size: outputStats.size,
+          width: outputInfo.width || targetW, height: outputInfo.height || targetH,
           createdAt: Date.now(), aiGenerated: true, description: `Merged from ${validClipsCount} clips`
         };
         session.assets.set(newAssetId, mergedAsset);

@@ -36,6 +36,8 @@ interface VideoPreviewProps {
   volume?: number;
   onLayerMove?: (layerId: string, x: number, y: number) => void;
   onLayerSelect?: (layerId: string) => void;
+  onCaptionEdit?: (layerId: string, newText: string) => void;
+  onCaptionBoxResize?: (layerId: string, newWidth: number) => void;
   selectedLayerId?: string | null;
 }
 
@@ -90,6 +92,8 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(({
   volume = 0.5,
   onLayerMove,
   onLayerSelect,
+  onCaptionEdit,
+  onCaptionBoxResize,
   selectedLayerId,
 }, ref) => {
   const videoRef = useRef<HTMLVideoElement>(null);
@@ -98,7 +102,13 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(({
   const containerRef = useRef<HTMLDivElement>(null);
   const [draggingLayer, setDraggingLayer] = useState<string | null>(null);
   const [dragStart, setDragStart] = useState<{ x: number; y: number; layerX: number; layerY: number } | null>(null);
+  const [editingCaptionId, setEditingCaptionId] = useState<string | null>(null);
+  const [editingText, setEditingText] = useState('');
+  const [resizingCaption, setResizingCaption] = useState<string | null>(null);
+  const [resizeStart, setResizeStart] = useState<{ x: number; boxWidth: number; containerWidth: number } | null>(null);
+  const editInputRef = useRef<HTMLTextAreaElement>(null);
   const prevBaseLayerIdRef = useRef<string | undefined>(undefined);
+  const [alignGuides, setAlignGuides] = useState<{ h: boolean; v: boolean }>({ h: false, v: false });
 
   // Find the base video layer (V1) for audio/playback control
   const foundBaseLayer = layers.find(l => l.trackId === 'V1' && l.type === 'video');
@@ -248,6 +258,8 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(({
     // Only allow dragging non-V1 layers (overlays)
     if (layer.trackId === 'V1') return;
     if (e.button !== 0) return;
+    // Don't start drag if we're editing text
+    if (editingCaptionId === layer.id) return;
 
     e.preventDefault();
     e.stopPropagation();
@@ -262,9 +274,71 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(({
 
     // Select this layer
     onLayerSelect?.(layer.id);
+  }, [onLayerSelect, editingCaptionId]);
+
+  // Handle double-click on caption layer to enter edit mode
+  const handleCaptionDoubleClick = useCallback((e: React.MouseEvent, layer: ClipLayer) => {
+    e.preventDefault();
+    e.stopPropagation();
+    const text = layer.captionWords?.map(w => w.text).join(' ') || '';
+    setEditingCaptionId(layer.id);
+    setEditingText(text);
+    onLayerSelect?.(layer.id);
+    // Focus the input after render
+    setTimeout(() => editInputRef.current?.focus(), 0);
   }, [onLayerSelect]);
 
+  // Commit caption edit
+  const commitCaptionEdit = useCallback(() => {
+    if (editingCaptionId && editingText.trim()) {
+      onCaptionEdit?.(editingCaptionId, editingText.trim());
+    }
+    setEditingCaptionId(null);
+    setEditingText('');
+  }, [editingCaptionId, editingText, onCaptionEdit]);
+
+  // Handle resize start on caption corner handle
+  const handleResizeMouseDown = useCallback((e: React.MouseEvent, layer: ClipLayer) => {
+    e.preventDefault();
+    e.stopPropagation();
+    const cw = containerRef.current?.clientWidth || 600;
+    setResizingCaption(layer.id);
+    setResizeStart({
+      x: e.clientX,
+      boxWidth: layer.captionStyle?.boxWidth || 90,
+      containerWidth: cw,
+    });
+    onLayerSelect?.(layer.id);
+  }, [onLayerSelect]);
+
+  // Handle resize mouse move — horizontal drag changes box width %
+  useEffect(() => {
+    if (!resizingCaption || !resizeStart) return;
+
+    const handleMouseMove = (e: MouseEvent) => {
+      // Convert pixel delta to percentage of container width
+      // Multiply by 2 because the box is centered (drag on right edge grows both sides)
+      const deltaX = e.clientX - resizeStart.x;
+      const deltaPct = (deltaX / resizeStart.containerWidth) * 200;
+      const newWidth = Math.max(10, Math.min(100, resizeStart.boxWidth + deltaPct));
+      onCaptionBoxResize?.(resizingCaption, Math.round(newWidth));
+    };
+
+    const handleMouseUp = () => {
+      setResizingCaption(null);
+      setResizeStart(null);
+    };
+
+    window.addEventListener('mousemove', handleMouseMove);
+    window.addEventListener('mouseup', handleMouseUp);
+    return () => {
+      window.removeEventListener('mousemove', handleMouseMove);
+      window.removeEventListener('mouseup', handleMouseUp);
+    };
+  }, [resizingCaption, resizeStart, onCaptionBoxResize]);
+
   // Handle mouse move for dragging
+  const SNAP_THRESHOLD = 6; // pixels — snap to center when within this distance
   useEffect(() => {
     if (!draggingLayer || !dragStart) return;
 
@@ -272,15 +346,42 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(({
       const deltaX = e.clientX - dragStart.x;
       const deltaY = e.clientY - dragStart.y;
 
-      const newX = dragStart.layerX + deltaX;
-      const newY = dragStart.layerY + deltaY;
+      let newX = dragStart.layerX + deltaX;
+      let newY = dragStart.layerY + deltaY;
 
+      // Snap vertical guide: x=0 means horizontally centered
+      const snapV = Math.abs(newX) < SNAP_THRESHOLD;
+      if (snapV) newX = 0;
+
+      // Snap horizontal guide: measure actual element center vs container center
+      let snapH = false;
+      const container = containerRef.current;
+      if (container) {
+        const containerRect = container.getBoundingClientRect();
+        // Find the dragged element inside the container
+        const draggedEl = container.querySelector(`[data-layer-id="${draggingLayer}"]`) as HTMLElement;
+        if (draggedEl) {
+          const elRect = draggedEl.getBoundingClientRect();
+          const elCenterY = elRect.top + elRect.height / 2;
+          const containerCenterY = containerRect.top + containerRect.height / 2;
+          const distFromCenter = elCenterY - containerCenterY;
+
+          if (Math.abs(distFromCenter) < SNAP_THRESHOLD) {
+            // Snap: adjust newY so element center lands exactly on container center
+            newY = newY - distFromCenter;
+            snapH = true;
+          }
+        }
+      }
+
+      setAlignGuides({ h: snapH, v: snapV });
       onLayerMove?.(draggingLayer, newX, newY);
     };
 
     const handleMouseUp = () => {
       setDraggingLayer(null);
       setDragStart(null);
+      setAlignGuides({ h: false, v: false });
     };
 
     window.addEventListener('mousemove', handleMouseMove);
@@ -412,6 +513,7 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(({
             return (
               <div
                 key={layer.id}
+                data-layer-id={layer.id}
                 className="absolute cursor-grab active:cursor-grabbing"
                 style={{
                   width: `${scale * 100}%`,
@@ -461,13 +563,78 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(({
         }
 
         if (layer.type === 'caption' && layer.captionWords && layer.captionStyle) {
+          const isCaptionSelected = selectedLayerId === layer.id;
+          const isEditing = editingCaptionId === layer.id;
+          const captionX = layer.transform?.x || 0;
+          const captionY = layer.transform?.y || 0;
+          const boxWidth = layer.captionStyle.boxWidth || 90;
+
           return (
-            <CaptionRenderer
+            <div
               key={layer.id}
-              words={layer.captionWords}
-              style={layer.captionStyle}
-              currentTime={layer.clipTime}
-            />
+              data-layer-id={layer.id}
+              className={`absolute z-40 ${isEditing ? '' : 'cursor-grab active:cursor-grabbing'}`}
+              style={{
+                left: '50%',
+                bottom: layer.captionStyle.position === 'top' ? undefined : layer.captionStyle.position === 'center' ? undefined : '8%',
+                top: layer.captionStyle.position === 'top' ? '8%' : layer.captionStyle.position === 'center' ? '50%' : undefined,
+                transform: `translate(calc(-50% + ${captionX}px), ${layer.captionStyle.position === 'center' ? `calc(-50% + ${captionY}px)` : `${captionY}px`})`,
+                width: `${boxWidth}%`,
+                maxWidth: '100%',
+                textAlign: 'center' as const,
+                pointerEvents: 'auto',
+              }}
+              onMouseDown={(e) => handleLayerMouseDown(e, layer)}
+              onDoubleClick={(e) => handleCaptionDoubleClick(e, layer)}
+            >
+              {/* Selection ring + resize handles */}
+              {isCaptionSelected && !isEditing && (
+                <>
+                  <div className="absolute -inset-2 border-2 border-teal-500 rounded pointer-events-none" />
+                  {/* Resize handle - bottom right corner */}
+                  <div
+                    className="absolute -bottom-3 -right-3 w-5 h-5 bg-teal-500 rounded-full cursor-nwse-resize flex items-center justify-center z-50 hover:bg-teal-400 shadow-lg"
+                    onMouseDown={(e) => handleResizeMouseDown(e, layer)}
+                  >
+                    <svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="white" strokeWidth="1.5">
+                      <path d="M2 8L8 2M5 8L8 5" />
+                    </svg>
+                  </div>
+                </>
+              )}
+
+              {isEditing ? (
+                /* Inline text editor */
+                <textarea
+                  ref={editInputRef}
+                  value={editingText}
+                  onChange={(e) => setEditingText(e.target.value)}
+                  onBlur={commitCaptionEdit}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); commitCaptionEdit(); }
+                    if (e.key === 'Escape') { setEditingCaptionId(null); setEditingText(''); }
+                  }}
+                  className="bg-black/70 text-white border-2 border-teal-500 rounded-lg p-3 w-full resize-none outline-none text-center"
+                  style={{
+                    fontFamily: layer.captionStyle.fontFamily,
+                    fontSize: `${layer.captionStyle.fontSize}px`,
+                    fontWeight: layer.captionStyle.fontWeight === 'black' ? 900 : layer.captionStyle.fontWeight === 'bold' ? 700 : 400,
+                    color: layer.captionStyle.color,
+                    lineHeight: 1.4,
+                    minHeight: '1.5em',
+                  }}
+                  rows={Math.max(1, Math.ceil(editingText.length / 30))}
+                />
+              ) : (
+                /* Normal caption render */
+                <CaptionRenderer
+                  words={layer.captionWords}
+                  style={layer.captionStyle}
+                  currentTime={layer.clipTime}
+                  inline
+                />
+              )}
+            </div>
           );
         }
 
@@ -515,6 +682,14 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(({
         {baseVideoLayer ? <Play className="w-3 h-3" /> : <ImageIcon className="w-3 h-3" />}
         <span>{baseVideoLayer ? 'video' : layers[0]?.type}</span>
       </div>
+
+      {/* Alignment guides */}
+      {draggingLayer && alignGuides.v && (
+        <div className="absolute top-0 bottom-0 left-1/2 w-px bg-teal-400/70 z-50 pointer-events-none" style={{ transform: 'translateX(-0.5px)' }} />
+      )}
+      {draggingLayer && alignGuides.h && (
+        <div className="absolute left-0 right-0 top-1/2 h-px bg-teal-400/70 z-50 pointer-events-none" style={{ transform: 'translateY(-0.5px)' }} />
+      )}
 
       {/* Dragging indicator */}
       {draggingLayer && (

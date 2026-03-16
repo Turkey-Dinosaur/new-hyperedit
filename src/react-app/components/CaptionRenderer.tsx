@@ -5,9 +5,10 @@ interface CaptionRendererProps {
   words: CaptionWord[];
   style: CaptionStyle;
   currentTime: number;  // Time within the caption clip
+  inline?: boolean;     // When true, skip absolute positioning (parent handles it)
 }
 
-export default function CaptionRenderer({ words, style, currentTime }: CaptionRendererProps) {
+export default function CaptionRenderer({ words, style, currentTime, inline }: CaptionRendererProps) {
   // Apply time offset (negative = captions appear earlier, positive = later)
   const adjustedTime = currentTime - (style.timeOffset || 0);
 
@@ -38,13 +39,19 @@ export default function CaptionRenderer({ words, style, currentTime }: CaptionRe
 
   // Get position styles
   const positionStyles = useMemo((): React.CSSProperties => {
+    // When inline, parent handles positioning
+    if (inline) {
+      return { textAlign: 'center', width: '100%' };
+    }
+
+    const w = style.boxWidth || 90;
     const base: React.CSSProperties = {
       position: 'absolute',
       left: '50%',
       transform: 'translateX(-50%)',
       textAlign: 'center',
-      width: '90%',
-      maxWidth: '90%',
+      width: `${w}%`,
+      maxWidth: '100%',
     };
 
     switch (style.position) {
@@ -56,7 +63,7 @@ export default function CaptionRenderer({ words, style, currentTime }: CaptionRe
       default:
         return { ...base, bottom: '8%' };
     }
-  }, [style.position]);
+  }, [style.position, inline]);
 
   // Get text styles
   const textStyles = useMemo((): React.CSSProperties => {
@@ -124,7 +131,7 @@ export default function CaptionRenderer({ words, style, currentTime }: CaptionRe
   }
 
   return (
-    <div style={positionStyles} className="pointer-events-none z-40">
+    <div style={positionStyles} className="pointer-events-none">
       <div style={textStyles}>
         {visibleWords.map(({ word, index }, i) => (
           <span

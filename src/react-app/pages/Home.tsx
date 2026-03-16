@@ -40,6 +40,8 @@ export default function Home() {
   const [masterVolume, setMasterVolume] = useState(0.5);
   const [activeAgent, setActiveAgent] = useState<'director' | 'picasso' | 'dicaprio'>('director');
   const [showGifSearch, setShowGifSearch] = useState(false);
+  const [showTextOverlayModal, setShowTextOverlayModal] = useState(false);
+  const [textOverlayInput, setTextOverlayInput] = useState('');
   const [exportModal, setExportModal] = useState<{
     isOpen: boolean;
     status: 'rendering' | 'complete' | 'error';
@@ -80,8 +82,10 @@ export default function Home() {
     renderProject,
     getDuration,
     // Captions
+    addCaptionClip,
     addCaptionClipsBatch,
     updateCaptionStyle,
+    updateCaptionWords,
     getCaptionData,
     // Timeline tabs
     timelineTabs,
@@ -258,6 +262,7 @@ export default function Home() {
           clipStart: clip.start,
           captionWords: caption.words,
           captionStyle: caption.style,
+          transform: clip.transform,
         });
       }
     }
@@ -562,7 +567,10 @@ export default function Home() {
         updateTabClips(activeTabId, updatedClips);
       }
     } else {
-      deleteClip(clipId, autoSnap);
+      // Never ripple caption tracks — their positions are tied to video timestamps
+      const clip = clips.find(c => c.id === clipId);
+      const shouldRipple = autoSnap && !clip?.trackId.startsWith('T');
+      deleteClip(clipId, shouldRipple);
     }
 
     if (selectedClipIds.includes(clipId)) {
@@ -589,12 +597,38 @@ export default function Home() {
     saveProject();
   }, [clips, currentTime, splitClip, saveProject]);
 
-  // Handle adding text overlay
+  // Handle adding text overlay — opens in-app modal
   const handleAddText = useCallback(() => {
-    // Create a text clip on T1 track at current playhead
-    // TODO: Open text editor modal or add default text
-    console.log('Add text overlay at', currentTime);
-  }, [currentTime]);
+    setTextOverlayInput('');
+    setShowTextOverlayModal(true);
+  }, []);
+
+  // Confirm text overlay creation from modal
+  const handleConfirmTextOverlay = useCallback(() => {
+    if (!textOverlayInput.trim()) return;
+    const duration = 3;
+    const words = [{ text: textOverlayInput.trim(), start: 0, end: duration }];
+    const clip = addCaptionClip(words, currentTime, duration);
+    setSelectedClipIds([clip.id]);
+    setLastSelectedClipId(clip.id);
+    setShowTextOverlayModal(false);
+    setTextOverlayInput('');
+    saveProject();
+  }, [textOverlayInput, currentTime, addCaptionClip, saveProject]);
+
+  // Handle caption text edit from preview (double-click inline edit)
+  const handleCaptionEdit = useCallback((layerId: string, newText: string) => {
+    const clip = activeClips.find(c => c.id === layerId);
+    if (!clip) return;
+    const words = [{ text: newText, start: 0, end: clip.duration }];
+    updateCaptionWords(layerId, words);
+    saveProject();
+  }, [activeClips, updateCaptionWords, saveProject]);
+
+  // Handle caption box resize from preview (corner drag)
+  const handleCaptionBoxResize = useCallback((layerId: string, newWidth: number) => {
+    updateCaptionStyle(layerId, { boxWidth: newWidth });
+  }, [updateCaptionStyle]);
 
   // Toggle aspect ratio between auto, 16:9 and 9:16
   const handleToggleAspectRatio = useCallback(() => {
@@ -1119,8 +1153,11 @@ export default function Home() {
       throw new Error('No session available');
     }
 
-    // Find the original (non-AI-generated) video asset to transcribe
-    const videoAsset = assets.find(a => a.type === 'video' && !a.aiGenerated) || assets.find(a => a.type === 'video');
+    // Find the video asset to transcribe: prefer the V1 clip on the timeline, fall back to any video
+    const v1Clip = activeClips.find(c => c.trackId === 'V1');
+    const videoAsset = (v1Clip && assets.find(a => a.id === v1Clip.assetId))
+      || assets.find(a => a.type === 'video' && !a.aiGenerated)
+      || assets.find(a => a.type === 'video');
 
     if (!videoAsset || videoAsset.type !== 'video') {
       throw new Error('Please upload a video first');
@@ -2369,6 +2406,8 @@ export default function Home() {
                 volume={masterVolume}
                 onLayerMove={handleLayerMove}
                 onLayerSelect={handleLayerSelect}
+                onCaptionEdit={handleCaptionEdit}
+                onCaptionBoxResize={handleCaptionBoxResize}
                 selectedLayerId={selectedClip?.id || null}
               />
             ) : clips.length > 0 ? (
@@ -2560,6 +2599,49 @@ export default function Home() {
         onClose={() => setExportModal({ isOpen: false, status: 'rendering', progress: 0 })}
         onRetry={handleExport}
       />
+
+      {/* Text Overlay Modal */}
+      {showTextOverlayModal && (
+        <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-[100]"
+          onClick={() => setShowTextOverlayModal(false)}
+        >
+          <div className="bg-zinc-900 border border-zinc-700 rounded-xl p-6 w-[420px] shadow-2xl"
+            onClick={e => e.stopPropagation()}
+          >
+            <h3 className="text-white text-lg font-semibold mb-4">Add Text Overlay</h3>
+            <textarea
+              autoFocus
+              value={textOverlayInput}
+              onChange={e => setTextOverlayInput(e.target.value)}
+              onKeyDown={e => {
+                if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleConfirmTextOverlay(); }
+                if (e.key === 'Escape') setShowTextOverlayModal(false);
+              }}
+              placeholder="Enter your text..."
+              className="w-full bg-zinc-800 border border-zinc-600 rounded-lg px-4 py-3 text-white placeholder-zinc-500 outline-none focus:border-teal-500 resize-none"
+              rows={3}
+            />
+            <p className="text-xs text-zinc-500 mt-2 mb-4">
+              Tip: Double-click the text in the preview to edit it. Drag to reposition, corner handle to resize.
+            </p>
+            <div className="flex gap-3 justify-end">
+              <button
+                onClick={() => setShowTextOverlayModal(false)}
+                className="px-4 py-2 rounded-lg border border-zinc-600 text-zinc-300 hover:bg-zinc-800 text-sm"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleConfirmTextOverlay}
+                disabled={!textOverlayInput.trim()}
+                className="px-4 py-2 rounded-lg bg-teal-600 text-white hover:bg-teal-500 disabled:opacity-40 disabled:cursor-not-allowed text-sm font-medium"
+              >
+                Add Text
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

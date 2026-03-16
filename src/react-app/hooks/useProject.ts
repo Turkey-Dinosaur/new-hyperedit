@@ -67,6 +67,7 @@ export interface CaptionStyle {
   animation: 'none' | 'karaoke' | 'fade' | 'pop' | 'bounce' | 'typewriter';
   highlightColor?: string;
   timeOffset?: number; // Offset in seconds to adjust sync (negative = earlier, positive = later)
+  boxWidth?: number; // Text box width as percentage (10-100), default 90
 }
 
 // Caption clip data (stored alongside TimelineClip)
@@ -929,6 +930,18 @@ export function useProject() {
     });
   }, []);
 
+  // Update caption words (for inline text editing)
+  const updateCaptionWords = useCallback((clipId: string, words: CaptionWord[]): void => {
+    setCaptionData(prev => {
+      const existing = prev[clipId];
+      if (!existing) return prev;
+      return {
+        ...prev,
+        [clipId]: { ...existing, words },
+      };
+    });
+  }, []);
+
   // Get caption data for a clip
   const getCaptionData = useCallback((clipId: string): CaptionData | null => {
     return captionData[clipId] || null;
@@ -954,6 +967,7 @@ export function useProject() {
             tracks: tracksRef.current,
             clips: clipsRef.current,
             settings: settingsRef.current,
+            captionData: captionDataRef.current,
           }),
         });
         console.log('[Project] Saved');
@@ -1009,6 +1023,7 @@ export function useProject() {
         // Server tracks may be outdated (e.g., missing T1, V3, A2)
         if (data.clips) setClips(data.clips);
         if (data.settings) setSettings(data.settings);
+        if (data.captionData) setCaptionData(data.captionData);
       }
     } catch (error) {
       console.error('[Project] Load failed:', error);
@@ -1185,6 +1200,7 @@ export function useProject() {
     addCaptionClip,
     addCaptionClipsBatch,
     updateCaptionStyle,
+    updateCaptionWords,
     getCaptionData,
 
     // Project

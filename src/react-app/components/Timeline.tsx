@@ -699,9 +699,8 @@ export default function Timeline({
                       const captionData = getCaptionData?.(clip.id);
                       const isCaption = track.type === 'text';
                       const captionPreview = captionData?.words
-                        .slice(0, 5)
-                        .map(w => w.text)
-                        .join(' ') + (captionData && captionData.words.length > 5 ? '...' : '');
+                        ? captionData.words.slice(0, 5).map(w => w.text).join(' ') + (captionData.words.length > 5 ? '...' : '')
+                        : '';
 
                       // Gap logic: push subsequent clips on the target track to show where the clip will drop
                       let visualClip = clip;
