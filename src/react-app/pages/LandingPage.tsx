@@ -68,7 +68,7 @@ export default function LandingPage() {
       });
       const data = await res.json();
       if (data.sessionId) {
-        localStorage.setItem('clipwise-session', JSON.stringify({
+        localStorage.setItem('hyperedit-session', JSON.stringify({
           sessionId: data.sessionId,
           createdAt: Date.now(),
         }));
@@ -90,12 +90,12 @@ export default function LandingPage() {
     try {
       const dirHandle = await (window as unknown as { showDirectoryPicker: () => Promise<FileSystemDirectoryHandle> }).showDirectoryPicker();
 
-      // Verify it's a valid ClipWise project by reading project.json
+      // Verify it's a valid HyperEdit project by reading project.json
       let projectJson: FileSystemFileHandle;
       try {
         projectJson = await dirHandle.getFileHandle('project.json');
       } catch {
-        alert('Not a valid ClipWise project — no project.json found.');
+        alert('Not a valid HyperEdit project — no project.json found.');
         return;
       }
 
@@ -144,7 +144,7 @@ export default function LandingPage() {
         });
       }
 
-      localStorage.setItem('clipwise-session', JSON.stringify({
+      localStorage.setItem('hyperedit-session', JSON.stringify({
         sessionId,
         createdAt: Date.now(),
       }));
@@ -164,9 +164,9 @@ export default function LandingPage() {
       await fetch(`${FFMPEG_SERVER}/session/${showDeleteModal.sessionId}`, { method: 'DELETE' });
       // Clear localStorage if this was the active session
       try {
-        const stored = JSON.parse(localStorage.getItem('clipwise-session') || '{}');
+        const stored = JSON.parse(localStorage.getItem('hyperedit-session') || '{}');
         if (stored.sessionId === showDeleteModal.sessionId) {
-          localStorage.removeItem('clipwise-session');
+          localStorage.removeItem('hyperedit-session');
         }
       } catch { /* ignore */ }
       setProjects(prev => prev.filter(p => p.sessionId !== showDeleteModal.sessionId));
@@ -179,7 +179,7 @@ export default function LandingPage() {
   };
 
   const handleOpenExisting = (sessionId: string) => {
-    localStorage.setItem('clipwise-session', JSON.stringify({
+    localStorage.setItem('hyperedit-session', JSON.stringify({
       sessionId,
       createdAt: Date.now(),
     }));

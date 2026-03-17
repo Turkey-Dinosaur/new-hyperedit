@@ -1,6 +1,6 @@
-# ClipWise Setup & Usage Guide
+# HyperEdit Setup & Usage Guide
 
-This guide describes how to get ClipWise (formerly HyperEdit) running on a new machine and how to manage the development servers.
+This guide describes how to get HyperEdit running on a new machine and how to manage the development servers.
 
 ## Quick Start (New Machine)
 

@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-ClipWise (formerly HyperEdit) is an AI-powered video editor built with React 19, Remotion for motion graphics, and Cloudflare Workers for the backend. It's a Mocha platform app.
+HyperEdit is an AI-powered video editor built with React 19, Remotion for motion graphics, and Cloudflare Workers for the backend. It's a Mocha platform app.
 
 ## Commands
 
@@ -34,13 +34,18 @@ src/
 ├── react-app/           # Frontend React SPA
 │   ├── components/      # UI: Timeline, VideoPreview, AssetLibrary, AIPromptPanel, MotionGraphicsPanel
 │   ├── hooks/           # useProject (main state), useFFmpeg, useVideoSession
-│   └── pages/Home.tsx   # Main editor layout
+│   └── pages/           # Home.tsx (main editor), LandingPage.tsx
 ├── worker/index.ts      # Hono backend API (AI editing via Gemini)
 ├── remotion/            # Motion graphics system
+│   ├── DynamicAnimation.tsx  # AI-generated scenes (~107KB)
 │   └── templates/       # 11 templates with registry in index.ts
+├── shared/types.ts      # Shared client-server types (Zod schemas)
+└── types/env.d.ts       # Environment type definitions
 scripts/
 └── local-ffmpeg-server.js  # Session-based FFmpeg server with Whisper transcription
 ```
+
+**Available Google Fonts** (loaded in `index.html`): Bebas Neue, Inter, Montserrat, Oswald, Poppins, Roboto.
 
 **Largest files** (where most complexity lives):
 - `src/react-app/pages/Home.tsx` — ~2400 lines (main editor orchestration)
@@ -64,7 +69,7 @@ The `useProject()` hook in `src/react-app/hooks/useProject.ts` is the central st
 
 **Critical patterns:**
 - The hook uses parallel refs (`tracksRef`, `clipsRef`, `settingsRef`) synced via `useEffect` so debounced/async operations read latest state without stale closures. This is essential for `saveProject` and `renderProject`.
-- Session ID is persisted in `localStorage` under key `clipwise-session`. If the FFmpeg server restarts, the stored session may be invalid (404), in which case localStorage is cleared and a new session is created on next asset upload.
+- Session ID is persisted in `localStorage` under key `hyperedit-session`. If the FFmpeg server restarts, the stored session may be invalid (404), in which case localStorage is cleared and a new session is created on next asset upload.
 - Tracks are always initialized client-side (never loaded from server) to guard against outdated server data.
 - Auto-save is intentionally disabled to prevent excessive saves during drag operations. Saves must be triggered explicitly via `saveProject()`.
 - `refreshAssets` appends `?v=Date.now()` to `streamUrl` for cache-busting after server-side file modifications.
@@ -168,4 +173,5 @@ The segment-based approach (extract + concat) is required — single-pass filter
 
 - Vite config uses `@cloudflare/vite-plugin` and `@getmocha/vite-plugins`. `chunkSizeWarningLimit: 5000` due to Remotion's size.
 - `wrangler.json` app name is a UUID (Mocha app ID). SPA routing via `not_found_handling: "single-page-application"`.
+- `remotion.config.ts` at root sets video image format to JPEG and enables output overwrite.
 - No tests exist in the codebase. No testing framework is configured.

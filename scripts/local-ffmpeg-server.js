@@ -1,8 +1,8 @@
 import http from 'http';
 import { spawn, execSync } from 'child_process';
-import { createWriteStream, createReadStream, unlinkSync, mkdirSync, existsSync, writeFileSync, readFileSync, readdirSync, statSync, copyFileSync } from 'fs';
-import { join } from 'path';
-import { tmpdir } from 'os';
+import { createWriteStream, createReadStream, unlinkSync, mkdirSync, existsSync, writeFileSync, readFileSync, readdirSync, statSync, copyFileSync, cpSync, rmSync } from 'fs';
+import { join, resolve as pathResolve, basename, dirname } from 'path';
+import { tmpdir, homedir } from 'os';
 import { randomUUID } from 'crypto';
 import formidable from 'formidable';
 import { GoogleGenAI } from '@google/genai';
@@ -35,30 +35,53 @@ if (process.env.FAL_API_KEY && !process.env.FAL_KEY) {
 
 const PORT = 3333;
 const TEMP_DIR = join(tmpdir(), 'hyperedit-ffmpeg');
-const SESSIONS_DIR = join(TEMP_DIR, 'sessions');
+const OLD_SESSIONS_DIR = join(TEMP_DIR, 'sessions');
+const PROJECTS_DIR = process.env.HYPEREDIT_PROJECTS_DIR
+  || join(homedir(), '.hyperedit', 'projects');
 
 // Active video sessions - keeps videos on disk between edits
 const sessions = new Map();
 // Active background jobs (progress tracking)
 const jobs = new Map();
 
-// Ensure temp directories exist
+// Ensure directories exist
 if (!existsSync(TEMP_DIR)) {
   mkdirSync(TEMP_DIR, { recursive: true });
 }
-if (!existsSync(SESSIONS_DIR)) {
-  mkdirSync(SESSIONS_DIR, { recursive: true });
+if (!existsSync(PROJECTS_DIR)) {
+  mkdirSync(PROJECTS_DIR, { recursive: true });
 }
+
+// Migrate sessions from old /tmp/ location to persistent PROJECTS_DIR
+function migrateOldSessions() {
+  try {
+    if (!existsSync(OLD_SESSIONS_DIR)) return;
+    const oldDirs = readdirSync(OLD_SESSIONS_DIR, { withFileTypes: true })
+      .filter(d => d.isDirectory())
+      .map(d => d.name);
+    for (const sessionId of oldDirs) {
+      const dest = join(PROJECTS_DIR, sessionId);
+      if (!existsSync(dest)) {
+        const src = join(OLD_SESSIONS_DIR, sessionId);
+        cpSync(src, dest, { recursive: true });
+        console.log(`[Migration] Migrated session ${sessionId} to ${PROJECTS_DIR}`);
+      }
+    }
+  } catch (e) {
+    console.warn('[Migration] Could not migrate old sessions:', e.message);
+  }
+}
+migrateOldSessions();
 
 // Restore sessions from disk on server start
 function restoreSessionsFromDisk() {
   console.log('[Server] Restoring sessions from disk...');
-  const sessionDirs = readdirSync(SESSIONS_DIR, { withFileTypes: true })
+  const sessionDirs = readdirSync(PROJECTS_DIR, { withFileTypes: true })
     .filter(dirent => dirent.isDirectory())
     .map(dirent => dirent.name);
 
   for (const sessionId of sessionDirs) {
-    const sessionDir = join(SESSIONS_DIR, sessionId);
+    const sessionDir = join(PROJECTS_DIR, sessionId);
     const assetsDir = join(sessionDir, 'assets');
     const rendersDir = join(sessionDir, 'renders');
 
@@ -155,6 +178,38 @@ function restoreSessionsFromDisk() {
       }
     }
 
+    // Restore linked assets (files live outside session directory)
+    for (const [assetId, savedMeta] of Object.entries(savedAssetsMeta)) {
+      if (savedMeta.linked && savedMeta.originalPath && !assets.has(assetId)) {
+        if (existsSync(savedMeta.originalPath)) {
+          try {
+            const thumbPath = join(assetsDir, `${assetId}_thumb.jpg`);
+            const stats = statSync(savedMeta.originalPath);
+            assets.set(assetId, {
+              id: assetId,
+              type: savedMeta.type || 'video',
+              filename: savedMeta.filename || assetId,
+              path: savedMeta.originalPath,
+              linked: true,
+              originalPath: savedMeta.originalPath,
+              thumbPath: existsSync(thumbPath) ? thumbPath : null,
+              size: stats.size,
+              duration: savedMeta.duration,
+              width: savedMeta.width,
+              height: savedMeta.height,
+              createdAt: savedMeta.createdAt || stats.mtimeMs,
+              aiGenerated: false,
+            });
+            console.log(`[Session] Restored linked asset: ${savedMeta.filename || assetId}`);
+          } catch (e) {
+            console.warn(`[Session] Could not stat linked asset ${savedMeta.originalPath}: ${e.message}`);
+          }
+        } else {
+          console.warn(`[Session] Linked asset file missing: ${savedMeta.originalPath}`);
+        }
+      }
+    }
+
     // Restore project name and timestamps from project.json
     // Fallback: use first asset's original filename if no name is stored
     let fallbackName = 'Untitled Project';
@@ -212,6 +267,9 @@ function saveAssetMetadata(session) {
       sceneCount: asset.sceneCount,
       sceneDataPath: asset.sceneDataPath,
       editCount: asset.editCount || 0,
+      // Linked asset metadata (file lives outside session directory)
+      linked: asset.linked || false,
+      originalPath: asset.originalPath || null,
     };
   }
 
@@ -222,13 +280,26 @@ function saveAssetMetadata(session) {
   }
 }
 
+// Copy a linked asset into the session directory before modifying it in-place
+function ensureLocalCopy(session, assetId) {
+  const asset = session.assets.get(assetId);
+  if (!asset || !asset.linked) return;
+  const ext = (asset.filename.split('.').pop() || 'mp4').toLowerCase();
+  const localPath = join(session.assetsDir, `${assetId}.${ext}`);
+  copyFileSync(asset.path, localPath);
+  asset.path = localPath;
+  asset.linked = false;
+  saveAssetMetadata(session);
+  console.log(`[${session.id}] Copied linked asset to local: ${assetId}`);
+}
+
 // Run restoration on module load
 restoreSessionsFromDisk();
 
 // Session management
 function createSession(originalName) {
   const sessionId = randomUUID();
-  const sessionDir = join(SESSIONS_DIR, sessionId);
+  const sessionDir = join(PROJECTS_DIR, sessionId);
   const assetsDir = join(sessionDir, 'assets');
   const rendersDir = join(sessionDir, 'renders');
 
@@ -286,7 +357,6 @@ function cleanupSession(sessionId) {
   const session = sessions.get(sessionId);
   if (session) {
     try {
-      const { rmSync } = require('fs');
       rmSync(session.dir, { recursive: true, force: true });
       sessions.delete(sessionId);
       console.log(`[Session] Cleaned up: ${sessionId}`);
@@ -296,16 +366,7 @@ function cleanupSession(sessionId) {
   }
 }
 
-// Clean up old sessions (older than 2 hours)
-setInterval(() => {
-  const twoHoursAgo = Date.now() - (2 * 60 * 60 * 1000);
-  for (const [id, session] of sessions) {
-    if (session.createdAt < twoHoursAgo) {
-      console.log(`[Session] Auto-cleaning old session: ${id}`);
-      cleanupSession(id);
-    }
-  }
-}, 30 * 60 * 1000); // Check every 30 minutes
+// Projects are persistent — no auto-cleanup. Users delete explicitly via the UI.
 
 // Run FFmpeg command and return a promise
 function runFFmpeg(args, jobId, onProgress) {
@@ -1289,6 +1350,9 @@ async function handleSessionRemoveDeadAir(req, res, sessionId) {
       return;
     }
 
+    // Copy linked asset locally before modifying in-place
+    ensureLocalCopy(session, videoAsset.id);
+
     // Verify the video file exists on disk
     if (!existsSync(videoAsset.path)) {
       console.error(`[${jobId}] Video file missing: ${videoAsset.path}`);
@@ -1787,6 +1851,174 @@ async function handleAssetUpload(req, res, sessionId) {
   }
 }
 
+// Import local files by path (no HTTP upload — reference in-place)
+async function handleImportLocal(req, res, sessionId) {
+  const session = getSession(sessionId);
+  if (!session) {
+    res.writeHead(404, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+    res.end(JSON.stringify({ error: 'Session not found' }));
+    return;
+  }
+
+  try {
+    let body = '';
+    for await (const chunk of req) body += chunk;
+    const { paths } = JSON.parse(body);
+
+    if (!Array.isArray(paths) || paths.length === 0) {
+      res.writeHead(400, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+      res.end(JSON.stringify({ error: 'paths array is required' }));
+      return;
+    }
+
+    const imported = [];
+
+    for (const filePath of paths) {
+      const resolved = pathResolve(filePath);
+      if (!existsSync(resolved)) {
+        console.warn(`[${sessionId}] Import skipped (not found): ${resolved}`);
+        continue;
+      }
+
+      const stats = statSync(resolved);
+      if (!stats.isFile()) continue;
+
+      const assetId = randomUUID();
+      const originalName = basename(resolved);
+      const ext = originalName.split('.').pop()?.toLowerCase() || 'mp4';
+      const isImage = ['jpg', 'jpeg', 'png', 'gif', 'webp'].includes(ext);
+      const isAudio = ['mp3', 'wav', 'aac', 'm4a', 'ogg'].includes(ext);
+      const type = isImage ? 'image' : isAudio ? 'audio' : 'video';
+
+      // Extract metadata directly from original file (no copy)
+      let duration = 0, width = 0, height = 0;
+      if (!isAudio) {
+        try {
+          const info = await getMediaInfo(resolved);
+          duration = info.duration;
+          width = info.width;
+          height = info.height;
+        } catch (e) {
+          console.warn(`[${sessionId}] Could not get media info for ${originalName}: ${e.message}`);
+        }
+      } else {
+        try { duration = await getVideoDuration(resolved); } catch { }
+      }
+
+      // Generate thumbnail in session directory (small, ~50KB)
+      const thumbPath = join(session.assetsDir, `${assetId}_thumb.jpg`);
+      if (!isAudio) {
+        try {
+          await generateThumbnail(resolved, thumbPath, isImage);
+        } catch (e) {
+          console.warn(`[${sessionId}] Thumbnail generation failed for ${originalName}: ${e.message}`);
+        }
+      }
+
+      const asset = {
+        id: assetId,
+        type,
+        filename: originalName,
+        path: resolved,
+        linked: true,
+        originalPath: resolved,
+        thumbPath: existsSync(thumbPath) ? thumbPath : null,
+        duration: isImage ? 5 : duration,
+        size: stats.size,
+        width,
+        height,
+        createdAt: Date.now(),
+      };
+
+      session.assets.set(assetId, asset);
+
+      imported.push({
+        id: asset.id,
+        type: asset.type,
+        filename: asset.filename,
+        duration: asset.duration,
+        size: asset.size,
+        width: asset.width,
+        height: asset.height,
+        thumbnailUrl: asset.thumbPath ? `/session/${sessionId}/assets/${assetId}/thumbnail` : null,
+        streamUrl: `/session/${sessionId}/assets/${assetId}/stream`,
+      });
+
+      console.log(`[${sessionId}] Linked asset imported: ${originalName} (${type}, ${(stats.size / 1024 / 1024).toFixed(1)} MB)`);
+    }
+
+    saveAssetMetadata(session);
+
+    // Update session timestamp
+    session.updatedAt = Date.now();
+    session.project.updatedAt = session.updatedAt;
+    writeFileSync(join(session.dir, 'project.json'), JSON.stringify(session.project, null, 2));
+
+    res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+    res.end(JSON.stringify({ success: true, assets: imported }));
+
+  } catch (error) {
+    console.error(`[${sessionId}] Import local error:`, error.message);
+    res.writeHead(500, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+    res.end(JSON.stringify({ error: error.message }));
+  }
+}
+
+// Browse local filesystem directories
+function handleBrowse(req, res) {
+  try {
+    const url = new URL(req.url, `http://localhost:${PORT}`);
+    const requestedPath = url.searchParams.get('path') || join(homedir(), 'Videos');
+    const resolved = pathResolve(requestedPath);
+
+    if (!existsSync(resolved) || !statSync(resolved).isDirectory()) {
+      res.writeHead(400, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+      res.end(JSON.stringify({ error: 'Directory not found' }));
+      return;
+    }
+
+    const mediaExts = new Set([
+      'mp4', 'mov', 'avi', 'mkv', 'webm', 'wmv', 'flv', 'm4v',
+      'jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp', 'tiff',
+      'mp3', 'wav', 'aac', 'm4a', 'ogg', 'flac', 'wma',
+    ]);
+
+    const entries = [];
+    const dirents = readdirSync(resolved, { withFileTypes: true });
+
+    for (const dirent of dirents) {
+      // Skip hidden files/folders
+      if (dirent.name.startsWith('.')) continue;
+
+      if (dirent.isDirectory()) {
+        entries.push({ name: dirent.name, type: 'directory', size: 0, modified: 0 });
+      } else if (dirent.isFile()) {
+        const ext = dirent.name.split('.').pop()?.toLowerCase() || '';
+        if (!mediaExts.has(ext)) continue;
+        try {
+          const stats = statSync(join(resolved, dirent.name));
+          entries.push({ name: dirent.name, type: 'file', size: stats.size, modified: stats.mtimeMs });
+        } catch { }
+      }
+    }
+
+    // Sort: directories first, then files alphabetically
+    entries.sort((a, b) => {
+      if (a.type !== b.type) return a.type === 'directory' ? -1 : 1;
+      return a.name.localeCompare(b.name, undefined, { sensitivity: 'base' });
+    });
+
+    const parent = dirname(resolved);
+
+    res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+    res.end(JSON.stringify({ path: resolved, parent: parent !== resolved ? parent : null, entries }));
+
+  } catch (error) {
+    res.writeHead(500, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+    res.end(JSON.stringify({ error: error.message }));
+  }
+}
+
 // List all assets in session
 function handleAssetList(req, res, sessionId) {
   const session = getSession(sessionId);
@@ -1830,7 +2062,7 @@ function handleAssetDelete(req, res, sessionId, assetId) {
 
   // Remove files
   try {
-    if (existsSync(asset.path)) unlinkSync(asset.path);
+    if (existsSync(asset.path) && !asset.linked) unlinkSync(asset.path);
     if (asset.thumbPath && existsSync(asset.thumbPath)) unlinkSync(asset.thumbPath);
   } catch (e) {
     console.warn(`[${sessionId}] Asset file cleanup failed:`, e.message);
@@ -1996,6 +2228,7 @@ function handleProjectGet(req, res, sessionId) {
     tracks: session.project.tracks,
     clips: session.project.clips,
     settings: session.project.settings,
+    captionData: session.project.captionData || {},
   }));
 }
 
@@ -4784,6 +5017,9 @@ async function handleEditAnimation(req, res, sessionId) {
       res.end(JSON.stringify({ error: 'Original scene data not found - cannot edit this animation' }));
       return;
     }
+
+    // Copy linked asset locally before modifying in-place
+    ensureLocalCopy(session, assetId);
 
     const jobId = randomUUID();
     // IMPORTANT: Reuse the same asset ID to replace in-place (no asset creep)
@@ -7877,7 +8113,11 @@ async function handleUseTemplate(req, res, sessionId) {
           '-vsync', 'vfr',
           '-f', 'null',
           process.platform === 'win32' ? 'NUL' : '/dev/null'
-        ], jobId);
+        ], jobId, (currentSecs) => {
+          // Map scene detection progress from 2% to 9%
+          const pct = Math.round(2 + (currentSecs / videoDuration) * 7);
+          updateProgress(Math.min(pct, 9), `Detecting scene changes... ${Math.round((currentSecs / videoDuration) * 100)}%`);
+        });
 
         const ptsMatches = sceneStderr.matchAll(/pts_time:([\d.]+)/g);
         for (const match of ptsMatches) {
@@ -7985,35 +8225,10 @@ async function handleUseTemplate(req, res, sessionId) {
       }
 
       console.log(`[${jobId}] Extracted ${frameBase64s.length} frames`);
-      updateProgress(20, `Extracted ${frameBase64s.length} frames`);
+      updateProgress(25, `Extracted ${frameBase64s.length} frames`);
 
-      // ── Step D: Transcribe Audio ──
-      updateProgress(22, 'Transcribing audio...');
-
-      let transcriptChunks = [];
-      try {
-        const transcription = await getOrTranscribeVideo(session, videoAsset, jobId);
-        if (transcription && transcription.words && transcription.words.length > 0) {
-          // Condense words into timestamped chunks (~10 words each)
-          const words = transcription.words;
-          const chunkSize = 10;
-          for (let i = 0; i < words.length; i += chunkSize) {
-            const chunk = words.slice(i, i + chunkSize);
-            const startTime = chunk[0].start;
-            const endTime = chunk[chunk.length - 1].end;
-            const text = chunk.map(w => w.text).join(' ');
-            transcriptChunks.push(`[${formatTimestamp(startTime)}-${formatTimestamp(endTime)}] "${text}"`);
-          }
-          console.log(`[${jobId}] Transcription complete: ${words.length} words, ${transcriptChunks.length} chunks`);
-        }
-      } catch (transcribeErr) {
-        console.log(`[${jobId}] Transcription failed (proceeding with frames only): ${transcribeErr.message}`);
-      }
-
-      updateProgress(35, transcriptChunks.length > 0 ? 'Transcription complete' : 'Proceeding without transcript');
-
-      // ── Step E: Gemini Pass 1 — Content Understanding ──
-      updateProgress(37, 'AI analyzing content...');
+      // ── Step D: Gemini Pass 1 — Content Understanding ──
+      updateProgress(27, 'AI analyzing content...');
 
       const ai = new GoogleGenAI({ apiKey: geminiKey });
 
@@ -8024,13 +8239,9 @@ async function handleUseTemplate(req, res, sessionId) {
         frameParts.push({ inlineData: { mimeType: 'image/jpeg', data: frame.base64 } });
       }
 
-      const transcriptSection = transcriptChunks.length > 0
-        ? `\n\nTRANSCRIPT:\n${transcriptChunks.join('\n')}`
-        : '\n\n(No transcript available — analyze based on visuals only)';
-
       const pass1Prompt = `You are a professional viral video editor analyzing raw footage.
 
-I'm providing ${frameBase64s.length} frames extracted from a ${formatTimestamp(videoDuration)} video (${videoDuration.toFixed(0)}s total).${transcriptSection}
+I'm providing ${frameBase64s.length} frames extracted from a ${formatTimestamp(videoDuration)} video (${videoDuration.toFixed(0)}s total).
 
 Analyze this footage and provide:
 1. "content_type": What kind of video is this? (e.g., "restoration", "cooking tutorial", "travel vlog", "product review", "event highlight", "DIY project", "fitness routine")
@@ -8082,7 +8293,7 @@ Return valid JSON only.`;
           hook_candidates: [],
           climax_candidates: [],
           skip_sections: [],
-          pacing_recommendation: 'Create a 60-120 second highlight reel from the best moments',
+          pacing_recommendation: 'Create a 60-80 second highlight reel from the best moments',
         };
       }
 
@@ -8095,7 +8306,7 @@ Return valid JSON only.`;
         `Scene ${i}: ${formatTimestamp(s.start)} - ${formatTimestamp(s.end)} (${s.duration.toFixed(1)}s)`
       ).join('\n');
 
-      const pass2Prompt = `You are a professional viral video editor creating a 60-120 second edit.
+      const pass2Prompt = `You are a professional viral video editor creating a 60-80 second edit.
 
 CONTENT ANALYSIS:
 ${JSON.stringify(contentAnalysis, null, 2)}
@@ -8104,11 +8315,25 @@ DETECTED SCENES:
 ${sceneList}
 (Total: ${videoDuration.toFixed(0)}s across ${scenes.length} scenes)
 
-Rules for a great viral edit:
-- Total output MUST be between 60-120 seconds. Calculate carefully.
-- First 3 seconds must hook the viewer — use the most dramatic, satisfying, or surprising moment
-- Pacing: vary the rhythm. Mix quick cuts with longer moments. Don't make every clip the same length.
-- Repetitive work (sanding, painting, cooking same steps) → timelapse at 4x-32x speed depending on source length
+EDITING TEMPLATE — follow this structure as closely as the source footage allows:
+  00:00 – 00:03  Quick-fire series of before shots (unrestored / raw state)
+  00:03 – 00:06  Timelapse of tool setup
+  00:06 – 00:08  Sip of drink / brief pause moment
+  00:08 – 00:23  Sanding timelapse (first pass)
+  00:23 – 00:27  Changing sander / switching tools
+  00:27 – 00:32  Sanding timelapse (second pass — do NOT re-use shots from the first sanding section)
+  00:32 – 00:34  Mixing the oil / finish product in the tin
+  00:34 – 00:44  Applying the oil / finish to the worktops (vary the shots)
+  00:44 – 00:51  After shots of restored worktops
+  00:51 – 00:59  Client reaction / final reveal
+
+The timings above are targets. If the source footage doesn't have an exact match for a section (e.g., no client reaction), skip that section and redistribute time to adjacent sections. The sanding timelapse sections can be expanded to keep the total output between 60-80 seconds — videos shorter than 60 seconds are not acceptable.
+
+Rules:
+- Total output MUST be between 60-80 seconds. Calculate carefully.
+- First 3 seconds must hook the viewer — use dramatic before shots or the most striking contrast
+- Sanding / repetitive work → timelapse at 4x-32x speed depending on source length
+- Do NOT re-use the same footage in multiple sections — each section must use unique shots
 - Keep the most visually interesting angle of each activity, skip redundant angles of the same thing
 - Preserve key audio moments — don't cut mid-sentence on important dialogue
 - End with the most satisfying payoff moment (reveal, reaction, finished result)
@@ -8122,6 +8347,7 @@ For EACH scene that should be INCLUDED (not skipped), provide:
 - "trimStart": optional seconds from scene start to trim the beginning (default 0)
 - "trimEnd": optional seconds from scene start for the trim end point (default: scene duration)
 - "position": "hook" (opening), "middle", or "climax" (ending)
+- "templateSection": which section of the editing template this fulfills (e.g., "before shots", "sanding timelapse 1", "applying oil", "client reaction")
 - "reason": brief explanation
 
 Omit scenes that should be skipped entirely.
@@ -8129,7 +8355,7 @@ Omit scenes that should be skipped entirely.
 IMPORTANT: Calculate your total output duration. For each kept scene:
 - keep: (trimEnd - trimStart) seconds
 - timelapse: (trimEnd - trimStart) / speed seconds
-Sum must be 60-120 seconds. Show your calculation in "durationCalc".
+Sum must be 60-80 seconds. Show your calculation in "durationCalc".
 
 Return JSON: { "editDecisions": [...], "estimatedDuration": number, "editingNotes": "brief summary", "durationCalc": "your math" }`;
 
@@ -8875,7 +9101,9 @@ const server = http.createServer(async (req, res) => {
       await handleSessionRename(req, res, sessionId);
     }
     // Multi-asset endpoints
-    else if (req.method === 'POST' && action === 'assets') {
+    else if (req.method === 'POST' && action === 'import-local') {
+      await handleImportLocal(req, res, sessionId);
+    } else if (req.method === 'POST' && action === 'assets') {
       await handleAssetUpload(req, res, sessionId);
     } else if (req.method === 'GET' && action === 'assets') {
       handleAssetList(req, res, sessionId);
@@ -9020,6 +9248,8 @@ const server = http.createServer(async (req, res) => {
     await handleGenerateChapters(req, res);
   } else if (req.method === 'GET' && path === '/sessions') {
     handleSessionsList(req, res);
+  } else if (req.method === 'GET' && path.startsWith('/browse')) {
+    handleBrowse(req, res);
   } else if (req.method === 'GET' && path === '/health') {
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ status: 'ok', ffmpeg: 'native', sessions: sessions.size }));
@@ -9031,6 +9261,7 @@ const server = http.createServer(async (req, res) => {
 
 server.listen(PORT, () => {
   console.log(`\n🎬 Local FFmpeg server running at http://localhost:${PORT}`);
+  console.log(`   Projects stored at: ${PROJECTS_DIR}`);
   console.log(`\n   Session API:`);
   console.log(`   POST /session/upload - Upload video, get sessionId`);
   console.log(`   GET  /session/:id/stream - Stream video for preview`);

@@ -1,7 +1,7 @@
-# ClipWise Development Setup Script (Windows)
+# HyperEdit Development Setup Script (Windows)
 # This script installs Node.js and Python dependencies.
 
-Write-Host "🚀 Starting ClipWise Setup..." -ForegroundColor Cyan
+Write-Host "🚀 Starting HyperEdit Setup..." -ForegroundColor Cyan
 
 # 1. Install Node.js dependencies
 Write-Host "`n📦 Installing Node.js dependencies..." -ForegroundColor Yellow

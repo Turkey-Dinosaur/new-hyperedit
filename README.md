@@ -1,4 +1,4 @@
-# ClipWise (formerly HyperEdit)
+# HyperEdit
 
 AI-powered video editor built with React 19, Remotion, and Cloudflare Workers.
 

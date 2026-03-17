@@ -4,7 +4,7 @@
 
 # New Features Implementation Plan
 
-Add 6 new AI-powered features to ClipWise (HyperEdit), all accessible from the **Director tab → Quick Actions** submenu in [AIPromptPanel.tsx](file:///c:/Users/Ashley/.gemini/antigravity/scratch/new-hyperedit/src/react-app/components/AIPromptPanel.tsx).
+Add 6 new AI-powered features to HyperEdit, all accessible from the **Director tab → Quick Actions** submenu in [AIPromptPanel.tsx](file:///c:/Users/Ashley/.gemini/antigravity/scratch/new-hyperedit/src/react-app/components/AIPromptPanel.tsx).
 
 ## User Review Required
 

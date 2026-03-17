@@ -1,7 +1,7 @@
 import { useState, useCallback, useRef, useEffect } from 'react';
 
 const LOCAL_FFMPEG_URL = 'http://localhost:3333';
-const SESSION_STORAGE_KEY = 'clipwise-session';
+const SESSION_STORAGE_KEY = 'hyperedit-session';
 
 // Asset - source file in library
 export interface Asset {
@@ -380,6 +380,64 @@ export function useProject() {
       setAssets(prev => [...prev, asset]);
       setStatus('');
       return asset;
+    } finally {
+      setLoading(false);
+    }
+  }, [session]);
+
+  // Import local files by path (no HTTP upload — server reads directly from disk)
+  const importLocalFiles = useCallback(async (paths: string[]): Promise<Asset[]> => {
+    setLoading(true);
+    setStatus(`Importing ${paths.length} file${paths.length > 1 ? 's' : ''}...`);
+
+    try {
+      let currentSession = session;
+
+      if (!currentSession) {
+        const createResponse = await fetch(`${LOCAL_FFMPEG_URL}/session/create`, {
+          method: 'POST',
+        });
+
+        if (!createResponse.ok) {
+          const error = await createResponse.json();
+          throw new Error(error.error || 'Failed to create session');
+        }
+
+        const createResult = await createResponse.json();
+        currentSession = {
+          sessionId: createResult.sessionId,
+          createdAt: Date.now(),
+        };
+        setSession(currentSession);
+      }
+
+      const response = await fetch(`${LOCAL_FFMPEG_URL}/session/${currentSession.sessionId}/import-local`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ paths }),
+      });
+
+      if (!response.ok) {
+        const error = await response.json();
+        throw new Error(error.error || 'Import failed');
+      }
+
+      const result = await response.json();
+      const newAssets: Asset[] = result.assets.map((a: Record<string, unknown>) => ({
+        id: a.id,
+        type: a.type,
+        filename: a.filename,
+        duration: a.duration,
+        size: a.size,
+        width: a.width,
+        height: a.height,
+        thumbnailUrl: a.thumbnailUrl ? `${LOCAL_FFMPEG_URL}${a.thumbnailUrl}` : null,
+        streamUrl: a.streamUrl ? `${LOCAL_FFMPEG_URL}${a.streamUrl}` : undefined,
+      }));
+
+      setAssets(prev => [...prev, ...newAssets]);
+      setStatus('');
+      return newAssets;
     } finally {
       setLoading(false);
     }
@@ -1172,6 +1230,7 @@ export function useProject() {
 
     // Assets
     uploadAsset,
+    importLocalFiles,
     deleteAsset,
     getAssetStreamUrl,
     refreshAssets,

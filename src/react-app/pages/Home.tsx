@@ -9,6 +9,7 @@ import AIPromptPanel from '@/react-app/components/AIPromptPanel';
 import PicassoPanel from '@/react-app/components/PicassoPanel';
 import DiCaprioPanel from '@/react-app/components/DiCaprioPanel';
 import GifSearchPanel from '@/react-app/components/GifSearchPanel';
+import FileBrowserPanel from '@/react-app/components/FileBrowserPanel';
 import ExportModal from '@/react-app/components/ExportModal';
 import ResizablePanel from '@/react-app/components/ResizablePanel';
 import ResizableVerticalPanel from '@/react-app/components/ResizableVerticalPanel';
@@ -40,6 +41,7 @@ export default function Home() {
   const [masterVolume, setMasterVolume] = useState(0.5);
   const [activeAgent, setActiveAgent] = useState<'director' | 'picasso' | 'dicaprio'>('director');
   const [showGifSearch, setShowGifSearch] = useState(false);
+  const [showFileBrowser, setShowFileBrowser] = useState(false);
   const [showTextOverlayModal, setShowTextOverlayModal] = useState(false);
   const [textOverlayInput, setTextOverlayInput] = useState('');
   const [exportModal, setExportModal] = useState<{
@@ -350,6 +352,12 @@ export default function Home() {
       }
     }
   }, [uploadAsset]);
+
+  // Handle files imported from local file browser
+  const handleFilesImported = useCallback(async () => {
+    await refreshAssets();
+    setShowFileBrowser(false);
+  }, [refreshAssets]);
 
   // Handle GIF added from search panel
   const handleGifAdded = useCallback(async () => {
@@ -2368,6 +2376,7 @@ export default function Home() {
                 selectedAssetIds={selectedAssetIds}
                 uploading={loading}
                 onOpenGifSearch={() => setShowGifSearch(true)}
+                onOpenFileBrowser={() => setShowFileBrowser(true)}
               />
             </div>
 
@@ -2583,6 +2592,15 @@ export default function Home() {
           sessionId={session.sessionId}
           onClose={() => setShowGifSearch(false)}
           onGifAdded={handleGifAdded}
+        />
+      )}
+
+      {/* File Browser Modal */}
+      {showFileBrowser && session?.sessionId && (
+        <FileBrowserPanel
+          sessionId={session.sessionId}
+          onClose={() => setShowFileBrowser(false)}
+          onImported={handleFilesImported}
         />
       )}
 

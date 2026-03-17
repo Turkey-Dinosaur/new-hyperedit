@@ -1,5 +1,5 @@
 import { useRef, useCallback } from 'react';
-import { Film, Image, Music, Upload, Trash2, Plus, Sparkles, ImageIcon } from 'lucide-react';
+import { Film, Image, Music, Upload, Trash2, Plus, Sparkles, ImageIcon, FolderOpen } from 'lucide-react';
 import type { Asset } from '@/react-app/hooks/useProject';
 
 interface AssetLibraryProps {
@@ -12,6 +12,7 @@ interface AssetLibraryProps {
   selectedAssetIds?: string[];
   uploading?: boolean;
   onOpenGifSearch?: () => void;
+  onOpenFileBrowser?: () => void;
 }
 
 const getAssetIcon = (type: Asset['type']) => {
@@ -55,6 +56,7 @@ export default function AssetLibrary({
   selectedAssetIds = [],
   uploading = false,
   onOpenGifSearch,
+  onOpenFileBrowser,
 }: AssetLibraryProps) {
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -94,6 +96,15 @@ export default function AssetLibrary({
       <div className="flex items-center justify-between px-3 py-2 border-b border-zinc-800/50">
         <span className="text-xs font-medium text-zinc-400">Assets</span>
         <div className="flex items-center gap-1.5">
+          {onOpenFileBrowser && (
+            <button
+              onClick={onOpenFileBrowser}
+              className="p-1.5 bg-zinc-700 hover:bg-zinc-600 rounded text-xs transition-colors"
+              title="Browse local files"
+            >
+              <FolderOpen className="w-3.5 h-3.5" />
+            </button>
+          )}
           {onOpenGifSearch && (
             <button
               onClick={onOpenGifSearch}

@@ -1,5 +1,5 @@
 New Features Implementation Plan
-Add 6 new AI-powered features to ClipWise (HyperEdit), all accessible from the Director tab → Quick Actions submenu in 
+Add 6 new AI-powered features to HyperEdit, all accessible from the Director tab → Quick Actions submenu in 
 AIPromptPanel.tsx
 .
 
