@@ -1,70 +1,118 @@
-# HyperEdit Setup & Usage Guide
+# HyperEdit Setup Guide
 
-This guide describes how to get HyperEdit running on a new machine and how to manage the development servers.
+## Prerequisites
 
-## Quick Start (New Machine)
+Install these before running the setup script:
 
-If you have just cloned this repository, run the following commands in order:
+| Tool | Download | Notes |
+|------|----------|-------|
+| **Node.js 18+** | https://nodejs.org | LTS version recommended |
+| **FFmpeg** | https://ffmpeg.org/download.html | Must be on your system PATH |
+| **Python 3.8+** | https://python.org | For local Whisper transcription |
 
-1.  **Install Node Dependencies**:
-    ```bash
-    npm install --legacy-peer-deps
-    ```
-2.  **Install Python Dependencies (for Transcription)**:
-    ```bash
-    pip install openai-whisper torch
-    ```
-3.  **Configure Environment**:
-    Create a `.dev.vars` file in the root directory and add your API keys:
-    ```text
-    GEMINI_API_KEY=your_key_here
-    OPENAI_API_KEY=your_key_here
-    FAL_API_KEY=your_key_here
-    GIPHY_API_KEY=your_key_here
-    ```
+**Installing FFmpeg on Windows:** Download a build from https://www.gyan.dev/ffmpeg/builds/, extract it, and add the `bin` folder to your system PATH environment variable.
 
-## Starting the App
+---
+
+## Quick Start
+
+```powershell
+# 1. Clone and enter the repo
+git clone https://github.com/Turkey-Dinosaur/new-hyperedit.git
+cd new-hyperedit
+
+# 2. Run the setup script (Windows)
+./setup-dev.ps1
+```
+
+The setup script installs Node and Python dependencies and creates a `.dev.vars` file from the example template.
+
+**Linux/macOS:** Run these manually instead:
+```bash
+npm install --legacy-peer-deps
+pip install openai-whisper torch
+cp .dev.vars.example .dev.vars
+```
+
+---
+
+## API Keys
+
+Open `.dev.vars` and fill in your keys:
+
+```text
+GEMINI_API_KEY=      # Required — Google AI Studio: https://aistudio.google.com
+FAL_API_KEY=         # Required — fal.ai: https://fal.ai
+GIPHY_API_KEY=       # Optional — GIPHY Developers: https://developers.giphy.com
+OPENAI_API_KEY=      # Optional — OpenAI: https://platform.openai.com
+```
+
+---
+
+## Running the App
 
 You need two terminals running simultaneously:
 
-**Terminal 1: Vite Dev Server**
+**Terminal 1:**
 ```bash
 npm run dev
 ```
 
-**Terminal 2: FFmpeg Server**
+**Terminal 2:**
 ```bash
 npm run ffmpeg-server
 ```
 
-Open [http://localhost:5173](http://localhost:5173) in your browser.
+Open **http://localhost:5173** in your browser.
+
+---
 
 ## Stopping the App
 
-### Normal Stop
-In both terminals, press **`Ctrl+C`**.
+Press `Ctrl+C` in both terminals.
 
-### Manual Force Stop (If port is already in use)
-If you see an `EADDRINUSE` error, the process might still be running in the background. Run these commands in a PowerShell terminal:
-
-**To kill FFmpeg Server (Port 3333):**
+If a port is still in use (Windows):
 ```powershell
-Stop-Process -Id (Get-NetTCPConnection -LocalPort 3333).OwningProcess -Force
+Stop-Process -Id (Get-NetTCPConnection -LocalPort 3333).OwningProcess -Force  # FFmpeg server
+Stop-Process -Id (Get-NetTCPConnection -LocalPort 5173).OwningProcess -Force  # Vite
 ```
 
-**To kill Vite Server (Port 5173):**
-```powershell
-Stop-Process -Id (Get-NetTCPConnection -LocalPort 5173).OwningProcess -Force
-```
+---
 
-## How Whisper Transcription Works
+## Optional: Obsidian Video Vault
 
-We've implemented a robust, three-tier fallback system for video transcription:
+The Obsidian tab lets you search a personal video library by content, tags, and transcript, then import clips directly into your session. It requires a PostgreSQL database.
 
-1.  **Local Whisper (Primary & Free)**: The server first checks if `openai-whisper` is installed locally via Python. If found, it uses your local CPU to transcribe the video. This is completely free and very accurate for word-level timestamps.
-2.  **OpenAI Whisper API (Secondary)**: If local Whisper is not available, the server attempts to use the OpenAI API. This requires a valid `OPENAI_API_KEY`.
-3.  **Gemini API (Final Fallback)**: If both of the above fail, it sends the audio to Gemini. While Gemini is smart, its timestamps can "drift" more than Whisper's, so local Whisper is the preferred method for perfectly synced captions.
+### Setup
 
-### Why we updated the code:
--   **Windows/Unix Support**: The code now checks for both `python3` and `python` commands to ensure it works on all operating systems.
--   **Graceful Degradation**: If an API key is invalid or a local installation is missing, the server won't crash; it will simply try the next available method and log the fallback in the terminal.
+1. **Install PostgreSQL** — https://www.postgresql.org/download/windows/
+2. **Create the database:**
+   ```bash
+   psql -U postgres -c "CREATE DATABASE hyperedit;"
+   ```
+3. **Add to `.dev.vars`:**
+   ```text
+   DATABASE_URL=postgresql://postgres:yourpassword@localhost:5432/hyperedit
+   DATABASE_SSL=false
+   OBSIDIAN_VIDEOS_PATH=C:\path\to\your\video\folder
+   OBSIDIAN_VAULT_PATH=C:\path\to\your\obsidian\vault   # optional, for thumbnails
+   ```
+4. **Create tables and index your videos:**
+   ```bash
+   npm run db:setup   # creates videos + transcripts tables
+   npm run db:scan    # scans OBSIDIAN_VIDEOS_PATH and inserts records
+   ```
+
+The Obsidian feature is fully optional — the app works normally without it.
+
+---
+
+## Caption Transcription
+
+Captions use a three-tier fallback:
+
+1. **Local Whisper (free, recommended)** — requires `pip install openai-whisper torch`
+2. **OpenAI Whisper API** — requires `OPENAI_API_KEY`
+3. **Gemini API** — automatic fallback, timestamps may drift on long clips
+
+Local Whisper runs on CPU only (MPS/GPU not supported). The `base` model is used by default.

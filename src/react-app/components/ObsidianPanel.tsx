@@ -76,8 +76,9 @@ export default function ObsidianPanel({ sessionId, onRefreshAssets }: ObsidianPa
         ...prev,
         {
           type: 'assistant',
-          text:
-            results.length === 0
+          text: data.unconfigured
+            ? "Obsidian vault not configured. Add DATABASE_URL and OBSIDIAN_VIDEOS_PATH to your .dev.vars file, then run npm run db:setup and npm run db:scan."
+            : results.length === 0
               ? "I couldn't find anything in your vault that matches. Try different keywords."
               : `Found ${results.length} match${results.length === 1 ? '' : 'es'}. Click Import to pull any of these into your editor.`,
           results,

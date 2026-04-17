@@ -7837,6 +7837,12 @@ async function handleObsidianSearch(req, res, sessionId) {
         return;
       }
 
+      if (!process.env.DATABASE_URL) {
+        res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+        res.end(JSON.stringify({ results: [], unconfigured: true }));
+        return;
+      }
+
       const results = await obsidianSearch(query.trim(), limit || 8);
 
       const enriched = results.map((r) => ({

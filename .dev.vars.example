@@ -1,0 +1,21 @@
+# Copy this file to .dev.vars and fill in your API keys.
+# .dev.vars is gitignored and never committed.
+
+# Required — Google AI (Gemini) for AI editing commands
+GEMINI_API_KEY=
+
+# Required — fal.ai for Picasso (image gen) and DiCaprio (video gen, restyle, bg removal)
+FAL_API_KEY=
+
+# Optional — GIPHY for GIF search panel
+GIPHY_API_KEY=
+
+# Optional — OpenAI for Whisper API fallback and TTS
+OPENAI_API_KEY=
+
+# Optional — Obsidian video vault (PostgreSQL-backed search)
+# Set these to enable the Obsidian tab in the right panel.
+# DATABASE_URL=postgresql://postgres:password@localhost:5433/hyperedit
+# DATABASE_SSL=false
+# OBSIDIAN_VIDEOS_PATH=C:\path\to\your\video\folder
+# OBSIDIAN_VAULT_PATH=C:\path\to\your\obsidian\vault
