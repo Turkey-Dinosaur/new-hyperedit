@@ -4,12 +4,12 @@
 
 # New Features Implementation Plan
 
-Add 6 new AI-powered features to HyperEdit, all accessible from the **Director tab → Quick Actions** submenu in [AIPromptPanel.tsx](file:///c:/Users/Ashley/.gemini/antigravity/scratch/new-hyperedit/src/react-app/components/AIPromptPanel.tsx).
+Add 6 new AI-powered features to HyperEdit, all accessible from the **Director tab → Quick Actions** submenu in [AIPromptPanel.tsx](src/react-app/components/AIPromptPanel.tsx).
 
 ## User Review Required
 
 > [!IMPORTANT]
-> **External API Dependencies**: Features 2 (Copy Video) and 5a (AI Voiceover) require OpenAI API calls. Feature 5c (Audio De-Noising) can use FFmpeg filters for a basic version, but a higher-quality version would need an external AI audio model. The `OPENAI_API_KEY` already exists in [.dev.vars](file:///c:/Users/Ashley/.gemini/antigravity/scratch/new-hyperedit/.dev.vars) — confirm it should be used for TTS voiceover.
+> **External API Dependencies**: Features 2 (Copy Video) and 5a (AI Voiceover) require OpenAI API calls. Feature 5c (Audio De-Noising) can use FFmpeg filters for a basic version, but a higher-quality version would need an external AI audio model. The `OPENAI_API_KEY` already exists in [.dev.vars](.dev.vars) — confirm it should be used for TTS voiceover.
 
 > [!WARNING]
 > **FFmpeg Server Size**: The server is already ~7,700 lines. Each feature adds 150-400 lines. Consider whether you'd like us to split it into separate files/modules as part of this work or keep everything in the single file for now.
@@ -37,11 +37,11 @@ graph LR
 
 | File | Role |
 |------|------|
-| [AIPromptPanel.tsx](file:///c:/Users/Ashley/.gemini/antigravity/scratch/new-hyperedit/src/react-app/components/AIPromptPanel.tsx) | Add to `suggestions[]`, [WorkflowType](file:///c:/Users/Ashley/.gemini/antigravity/scratch/new-hyperedit/src/react-app/components/AIPromptPanel.tsx#880-895), [determineWorkflow()](file:///c:/Users/Ashley/.gemini/antigravity/scratch/new-hyperedit/src/react-app/components/AIPromptPanel.tsx#911-1099), new `handleXxxWorkflow()` |
-| [Home.tsx](file:///c:/Users/Ashley/.gemini/antigravity/scratch/new-hyperedit/src/react-app/pages/Home.tsx) | Wire new callback props from `useProject` to [AIPromptPanel](file:///c:/Users/Ashley/.gemini/antigravity/scratch/new-hyperedit/src/react-app/components/AIPromptPanel.tsx#200-2994) |
-| [useProject.ts](file:///c:/Users/Ashley/.gemini/antigravity/scratch/new-hyperedit/src/react-app/hooks/useProject.ts) | (If needed) Add new state/actions for timeline manipulation |
-| [local-ffmpeg-server.js](file:///c:/Users/Ashley/.gemini/antigravity/scratch/new-hyperedit/scripts/local-ffmpeg-server.js) | Add endpoint handlers + route registrations |
-| [AIPromptPanelProps](file:///c:/Users/Ashley/.gemini/antigravity/scratch/new-hyperedit/src/react-app/components/AIPromptPanel.tsx#L166-L198) | Add new callback prop types |
+| [AIPromptPanel.tsx](src/react-app/components/AIPromptPanel.tsx) | Add to `suggestions[]`, [WorkflowType](src/react-app/components/AIPromptPanel.tsx#880-895), [determineWorkflow()](src/react-app/components/AIPromptPanel.tsx#911-1099), new `handleXxxWorkflow()` |
+| [Home.tsx](src/react-app/pages/Home.tsx) | Wire new callback props from `useProject` to [AIPromptPanel](src/react-app/components/AIPromptPanel.tsx#200-2994) |
+| [useProject.ts](src/react-app/hooks/useProject.ts) | (If needed) Add new state/actions for timeline manipulation |
+| [local-ffmpeg-server.js](scripts/local-ffmpeg-server.js) | Add endpoint handlers + route registrations |
+| [AIPromptPanelProps](src/react-app/components/AIPromptPanel.tsx#L166-L198) | Add new callback prop types |
 
 ---
 
@@ -53,7 +53,7 @@ graph LR
 
 ---
 
-#### [MODIFY] [local-ffmpeg-server.js](file:///c:/Users/Ashley/.gemini/antigravity/scratch/new-hyperedit/scripts/local-ffmpeg-server.js)
+#### [MODIFY] [local-ffmpeg-server.js](scripts/local-ffmpeg-server.js)
 
 **New endpoint: `POST /session/{id}/auto-edit`**
 
@@ -68,10 +68,10 @@ graph LR
 
 **Response**: `{ editList: EditListItem[], totalDuration: number }`
 
-#### [MODIFY] [AIPromptPanel.tsx](file:///c:/Users/Ashley/.gemini/antigravity/scratch/new-hyperedit/src/react-app/components/AIPromptPanel.tsx)
+#### [MODIFY] [AIPromptPanel.tsx](src/react-app/components/AIPromptPanel.tsx)
 
-- Add `'auto-edit'` to [WorkflowType](file:///c:/Users/Ashley/.gemini/antigravity/scratch/new-hyperedit/src/react-app/components/AIPromptPanel.tsx#880-895) union (line ~880)
-- Add keyword matching in [determineWorkflow()](file:///c:/Users/Ashley/.gemini/antigravity/scratch/new-hyperedit/src/react-app/components/AIPromptPanel.tsx#911-1099) for prompts like "auto edit", "smart edit", "storyboard", "create from clips"
+- Add `'auto-edit'` to [WorkflowType](src/react-app/components/AIPromptPanel.tsx#880-895) union (line ~880)
+- Add keyword matching in [determineWorkflow()](src/react-app/components/AIPromptPanel.tsx#911-1099) for prompts like "auto edit", "smart edit", "storyboard", "create from clips"
 - Add `handleAutoEditWorkflow()` handler:
   1. POST to `/session/{id}/auto-edit`
   2. Receive edit list JSON
@@ -79,10 +79,10 @@ graph LR
   4. On approval, call `onAutoEdit(editList)` callback to place clips on timeline
 - Add to `suggestions[]` array: `{ icon: Sparkles, text: 'Auto-edit from clips' }`
 
-#### [MODIFY] [Home.tsx](file:///c:/Users/Ashley/.gemini/antigravity/scratch/new-hyperedit/src/react-app/pages/Home.tsx)
+#### [MODIFY] [Home.tsx](src/react-app/pages/Home.tsx)
 
 - Add `handleAutoEdit` callback that maps the edit list to `addClip()` calls on V1 track
-- Wire as `onAutoEdit` prop to [AIPromptPanel](file:///c:/Users/Ashley/.gemini/antigravity/scratch/new-hyperedit/src/react-app/components/AIPromptPanel.tsx#200-2994)
+- Wire as `onAutoEdit` prop to [AIPromptPanel](src/react-app/components/AIPromptPanel.tsx#200-2994)
 
 ---
 
@@ -92,7 +92,7 @@ graph LR
 
 ---
 
-#### [MODIFY] [local-ffmpeg-server.js](file:///c:/Users/Ashley/.gemini/antigravity/scratch/new-hyperedit/scripts/local-ffmpeg-server.js)
+#### [MODIFY] [local-ffmpeg-server.js](scripts/local-ffmpeg-server.js)
 
 **New endpoint: `POST /session/{id}/analyze-reference`**
 
@@ -112,9 +112,9 @@ graph LR
 3. Trims clips to match `avgCutLength` from reference
 4. Returns same `editList` format as auto-edit
 
-#### [MODIFY] [AIPromptPanel.tsx](file:///c:/Users/Ashley/.gemini/antigravity/scratch/new-hyperedit/src/react-app/components/AIPromptPanel.tsx)
+#### [MODIFY] [AIPromptPanel.tsx](src/react-app/components/AIPromptPanel.tsx)
 
-- Add `'copy-video'` to [WorkflowType](file:///c:/Users/Ashley/.gemini/antigravity/scratch/new-hyperedit/src/react-app/components/AIPromptPanel.tsx#880-895)
+- Add `'copy-video'` to [WorkflowType](src/react-app/components/AIPromptPanel.tsx#880-895)
 - Add keyword matching: "copy video", "match style", "pace transfer", "replicate edit"
 - Add `handleCopyVideoWorkflow()`:
   1. Prompt user to select an asset as the reference video (use the existing reference picker or a dedicated selector)
@@ -124,7 +124,7 @@ graph LR
   5. Map result edit list to timeline
 - Add to `suggestions[]`: `{ icon: Copy, text: 'Copy video style' }` (import `Copy` from lucide-react)
 
-#### [MODIFY] [Home.tsx](file:///c:/Users/Ashley/.gemini/antigravity/scratch/new-hyperedit/src/react-app/pages/Home.tsx)
+#### [MODIFY] [Home.tsx](src/react-app/pages/Home.tsx)
 
 - Add `handleCopyVideoEdit` callback (similar pattern to `handleAutoEdit`)
 - Wire as `onCopyVideoEdit` prop
@@ -137,7 +137,7 @@ graph LR
 
 ---
 
-#### [MODIFY] [local-ffmpeg-server.js](file:///c:/Users/Ashley/.gemini/antigravity/scratch/new-hyperedit/scripts/local-ffmpeg-server.js)
+#### [MODIFY] [local-ffmpeg-server.js](scripts/local-ffmpeg-server.js)
 
 **New endpoint: `POST /session/{id}/create-timelapse`**
 
@@ -153,9 +153,9 @@ graph LR
 
 **Alternative (simpler first pass)**: Accept a uniform speed multiplier and just use `ffmpeg -i input.mp4 -filter:v "setpts=PTS/{speed}" -an output.mp4` for basic timelapse without AI analysis.
 
-#### [MODIFY] [AIPromptPanel.tsx](file:///c:/Users/Ashley/.gemini/antigravity/scratch/new-hyperedit/src/react-app/components/AIPromptPanel.tsx)
+#### [MODIFY] [AIPromptPanel.tsx](src/react-app/components/AIPromptPanel.tsx)
 
-- Add `'timelapse'` to [WorkflowType](file:///c:/Users/Ashley/.gemini/antigravity/scratch/new-hyperedit/src/react-app/components/AIPromptPanel.tsx#880-895)
+- Add `'timelapse'` to [WorkflowType](src/react-app/components/AIPromptPanel.tsx#880-895)
 - Add keyword matching: "timelapse", "time lapse", "speed up long", "fast forward"
 - Add `handleTimelapseWorkflow()`:
   1. If no specific clip referenced, offer selection — or default to longest clip
@@ -165,7 +165,7 @@ graph LR
   5. Update timeline clip with new duration
 - Add to `suggestions[]`: `{ icon: Timer, text: 'Create timelapse' }` (Timer already imported)
 
-#### [MODIFY] [Home.tsx](file:///c:/Users/Ashley/.gemini/antigravity/scratch/new-hyperedit/src/react-app/pages/Home.tsx)
+#### [MODIFY] [Home.tsx](src/react-app/pages/Home.tsx)
 
 - Add `handleCreateTimelapse` callback — calls server, refreshes assets, updates clip duration
 - Wire as `onCreateTimelapse` prop
@@ -178,12 +178,12 @@ graph LR
 
 ---
 
-#### [MODIFY] [local-ffmpeg-server.js](file:///c:/Users/Ashley/.gemini/antigravity/scratch/new-hyperedit/scripts/local-ffmpeg-server.js)
+#### [MODIFY] [local-ffmpeg-server.js](scripts/local-ffmpeg-server.js)
 
 **New endpoint: `POST /session/{id}/create-ad`**
 
 1. **Input**: `{ format: '15s' | '30s' | '60s', platform: 'tiktok' | 'instagram' | 'youtube', style?: string }`
-2. **Content analysis**: Use existing [getOrTranscribeVideo()](file:///c:/Users/Ashley/.gemini/antigravity/scratch/new-hyperedit/scripts/local-ffmpeg-server.js#2734-2848) + Gemini to identify:
+2. **Content analysis**: Use existing [getOrTranscribeVideo()](scripts/local-ffmpeg-server.js#2734-2848) + Gemini to identify:
    - "Hook" moment (most dramatic before/after contrast)
    - Key process phases
    - "Reveal" moment (finished result)
@@ -193,14 +193,14 @@ graph LR
    - Text overlays ("Gross to Great", "Professional Restoration")
    - Before/After split-screen
    - CTA ("Follow for more", "Link in Bio")
-4. **Render via Remotion**: Use existing [handleGenerateAnimation](file:///c:/Users/Ashley/.gemini/antigravity/scratch/new-hyperedit/scripts/local-ffmpeg-server.js#3669-4367) pattern — Gemini produces the DynamicAnimation scene JSON, Remotion renders it with the user's actual video clips embedded.
+4. **Render via Remotion**: Use existing [handleGenerateAnimation](scripts/local-ffmpeg-server.js#3669-4367) pattern — Gemini produces the DynamicAnimation scene JSON, Remotion renders it with the user's actual video clips embedded.
 5. **Output**: New asset with the rendered ad video
 
 This heavily reuses the existing **DynamicAnimation** + **Remotion rendering** pipeline.
 
-#### [MODIFY] [AIPromptPanel.tsx](file:///c:/Users/Ashley/.gemini/antigravity/scratch/new-hyperedit/src/react-app/components/AIPromptPanel.tsx)
+#### [MODIFY] [AIPromptPanel.tsx](src/react-app/components/AIPromptPanel.tsx)
 
-- Add `'create-ad'` to [WorkflowType](file:///c:/Users/Ashley/.gemini/antigravity/scratch/new-hyperedit/src/react-app/components/AIPromptPanel.tsx#880-895)
+- Add `'create-ad'` to [WorkflowType](src/react-app/components/AIPromptPanel.tsx#880-895)
 - Add keyword matching: "create ad", "tiktok ad", "promotional", "social media ad", "create promo"
 - Add `handleCreateAdWorkflow()`:
   1. Ask for platform/duration preference (use clarification options UI)
@@ -209,7 +209,7 @@ This heavily reuses the existing **DynamicAnimation** + **Remotion rendering** p
   4. Render and add to timeline on approval
 - Add to `suggestions[]`: `{ icon: Zap, text: 'Create social ad' }` (or a new icon like `Megaphone`)
 
-#### [MODIFY] [Home.tsx](file:///c:/Users/Ashley/.gemini/antigravity/scratch/new-hyperedit/src/react-app/pages/Home.tsx)
+#### [MODIFY] [Home.tsx](src/react-app/pages/Home.tsx)
 
 - Wire `onCreateAd` callback (follows same pattern as `onCreateCustomAnimation`)
 
@@ -223,25 +223,25 @@ These are 3 smaller features grouped together.
 
 #### 5a. AI Voiceover (TTS)
 
-##### [MODIFY] [local-ffmpeg-server.js](file:///c:/Users/Ashley/.gemini/antigravity/scratch/new-hyperedit/scripts/local-ffmpeg-server.js)
+##### [MODIFY] [local-ffmpeg-server.js](scripts/local-ffmpeg-server.js)
 
 **New endpoint: `POST /session/{id}/generate-voiceover`**
 
 1. **Input**: `{ script?: string, autoGenerate?: boolean, voice?: string }`
 2. **Script generation**: If `autoGenerate`, use existing transcription + Gemini to write a narration script based on the video phases (e.g. "Now we move to 240 grit for that buttery smooth finish")
-3. **TTS synthesis**: Call OpenAI `audio/speech` API (model: `tts-1`, voice: `alloy`/`nova`/etc.) — the `OPENAI_API_KEY` is already in [.dev.vars](file:///c:/Users/Ashley/.gemini/antigravity/scratch/new-hyperedit/.dev.vars)
+3. **TTS synthesis**: Call OpenAI `audio/speech` API (model: `tts-1`, voice: `alloy`/`nova`/etc.) — the `OPENAI_API_KEY` is already in [.dev.vars](.dev.vars)
 4. **Save as audio asset**: Write the MP3 to the session, register as new audio asset
 5. **Output**: `{ assetId, filename, duration }` — frontend places on A2 track
 
-##### [MODIFY] [AIPromptPanel.tsx](file:///c:/Users/Ashley/.gemini/antigravity/scratch/new-hyperedit/src/react-app/components/AIPromptPanel.tsx)
+##### [MODIFY] [AIPromptPanel.tsx](src/react-app/components/AIPromptPanel.tsx)
 
-- Add `'voiceover'` to [WorkflowType](file:///c:/Users/Ashley/.gemini/antigravity/scratch/new-hyperedit/src/react-app/components/AIPromptPanel.tsx#880-895)
+- Add `'voiceover'` to [WorkflowType](src/react-app/components/AIPromptPanel.tsx#880-895)
 - Keyword matching: "voiceover", "narration", "voice over", "text to speech", "tts", "add narration"
 - `handleVoiceoverWorkflow()`: Ask for custom script or auto-generate, show script for approval, POST, add audio to A2
 
 #### 5b. Satisfaction Detection (Oil Reveal Slowdown)
 
-##### [MODIFY] [local-ffmpeg-server.js](file:///c:/Users/Ashley/.gemini/antigravity/scratch/new-hyperedit/scripts/local-ffmpeg-server.js)
+##### [MODIFY] [local-ffmpeg-server.js](scripts/local-ffmpeg-server.js)
 
 **New endpoint: `POST /session/{id}/detect-satisfaction-moments`**
 
@@ -254,7 +254,7 @@ This integrates into the **Timelapse** feature (Feature 3) as an enhancement —
 
 #### 5c. Audio De-noising / Cleanup
 
-##### [MODIFY] [local-ffmpeg-server.js](file:///c:/Users/Ashley/.gemini/antigravity/scratch/new-hyperedit/scripts/local-ffmpeg-server.js)
+##### [MODIFY] [local-ffmpeg-server.js](scripts/local-ffmpeg-server.js)
 
 **New endpoint: `POST /session/{id}/clean-audio`**
 
@@ -263,12 +263,12 @@ This integrates into the **Timelapse** feature (Feature 3) as an enhancement —
    - `denoise`: `afftdn=nf=-25` (already exists as an FFmpeg command suggestion)
    - `remove-tools`: `highpass=f=300,lowpass=f=4000,afftdn=nf=-30` (aggressive tool noise removal)
    - `asmr`: `highpass=f=100,lowpass=f=8000,afftdn=nf=-15,equalizer=f=2000:width_type=o:width=2:g=3` (keep wood scratching, remove motor noise)
-3. **Replace in-place**: Same pattern as existing [handleProcessAsset](file:///c:/Users/Ashley/.gemini/antigravity/scratch/new-hyperedit/scripts/local-ffmpeg-server.js#7357-7490)
+3. **Replace in-place**: Same pattern as existing [handleProcessAsset](scripts/local-ffmpeg-server.js#7357-7490)
 4. **Output**: `{ assetId, mode }`
 
-##### [MODIFY] [AIPromptPanel.tsx](file:///c:/Users/Ashley/.gemini/antigravity/scratch/new-hyperedit/src/react-app/components/AIPromptPanel.tsx)
+##### [MODIFY] [AIPromptPanel.tsx](src/react-app/components/AIPromptPanel.tsx)
 
-- Add `'clean-audio'` to [WorkflowType](file:///c:/Users/Ashley/.gemini/antigravity/scratch/new-hyperedit/src/react-app/components/AIPromptPanel.tsx#880-895)
+- Add `'clean-audio'` to [WorkflowType](src/react-app/components/AIPromptPanel.tsx#880-895)
 - Keyword matching: "clean audio", "denoise", "remove noise", "asmr audio", "audio cleanup"
 - `handleCleanAudioWorkflow()`: Use clarification UI for mode selection
 - Add to `suggestions[]`: `{ icon: Volume2, text: 'Clean audio (ASMR)' }`
@@ -281,11 +281,11 @@ This integrates into the **Timelapse** feature (Feature 3) as an enhancement —
 
 ---
 
-#### [MODIFY] [AIPromptPanel.tsx](file:///c:/Users/Ashley/.gemini/antigravity/scratch/new-hyperedit/src/react-app/components/AIPromptPanel.tsx)
+#### [MODIFY] [AIPromptPanel.tsx](src/react-app/components/AIPromptPanel.tsx)
 
 This feature is **frontend-only** — no backend endpoint needed.
 
-- Add `'auto-order'` to [WorkflowType](file:///c:/Users/Ashley/.gemini/antigravity/scratch/new-hyperedit/src/react-app/components/AIPromptPanel.tsx#880-895)
+- Add `'auto-order'` to [WorkflowType](src/react-app/components/AIPromptPanel.tsx#880-895)
 - Keyword matching: "auto order", "reorder clips", "sort clips", "chronological order", "order by time"
 - Add `handleAutoOrderWorkflow()`:
   1. Read all clips on V1 track
@@ -296,7 +296,7 @@ This feature is **frontend-only** — no backend endpoint needed.
   6. Show reorder summary in chat: "Reordered 8 clips chronologically: clip1 → clip4 → clip2 → ..."
 - Add to `suggestions[]`: `{ icon: ListOrdered, text: 'Auto-order clips' }` (ListOrdered already imported in Home.tsx — add import in AIPromptPanel)
 
-#### [MODIFY] [Home.tsx](file:///c:/Users/Ashley/.gemini/antigravity/scratch/new-hyperedit/src/react-app/pages/Home.tsx)
+#### [MODIFY] [Home.tsx](src/react-app/pages/Home.tsx)
 
 - Add `handleAutoOrder` callback:
   1. Get V1 clips + their asset filenames
@@ -309,7 +309,7 @@ This feature is **frontend-only** — no backend endpoint needed.
 
 ## Summary: All UI Changes to Quick Actions
 
-New entries for the `suggestions[]` array in [AIPromptPanel.tsx](file:///c:/Users/Ashley/.gemini/antigravity/scratch/new-hyperedit/src/react-app/components/AIPromptPanel.tsx):
+New entries for the `suggestions[]` array in [AIPromptPanel.tsx](src/react-app/components/AIPromptPanel.tsx):
 
 ```typescript
 const suggestions = [
@@ -324,7 +324,7 @@ const suggestions = [
 ];
 ```
 
-New [WorkflowType](file:///c:/Users/Ashley/.gemini/antigravity/scratch/new-hyperedit/src/react-app/components/AIPromptPanel.tsx#880-895) entries:
+New [WorkflowType](src/react-app/components/AIPromptPanel.tsx#880-895) entries:
 ```typescript
 type WorkflowType =
   // ... existing types ...
@@ -347,7 +347,7 @@ type WorkflowType =
 | Dependency | Purpose | Installation |
 |-----------|---------|-------------|
 | None for npm | All features use existing deps | — |
-| OpenAI TTS API | Voiceover (Feature 5a) | Already configured via `OPENAI_API_KEY` in [.dev.vars](file:///c:/Users/Ashley/.gemini/antigravity/scratch/new-hyperedit/.dev.vars) |
+| OpenAI TTS API | Voiceover (Feature 5a) | Already configured via `OPENAI_API_KEY` in [.dev.vars](.dev.vars) |
 
 No new npm packages are required. All features leverage existing tools:
 - **FFmpeg** (already installed) for video processing, audio filtering, scene detection
@@ -378,7 +378,7 @@ No new npm packages are required. All features leverage existing tools:
 ## Verification Plan
 
 > [!NOTE]
-> No test framework is currently configured in this project ([CLAUDE.md](file:///c:/Users/Ashley/.gemini/antigravity/scratch/new-hyperedit/CLAUDE.md) confirms: "No tests exist in the codebase. No testing framework is configured."). Verification will be manual via the browser and server logs.
+> No test framework is currently configured in this project ([CLAUDE.md](CLAUDE.md) confirms: "No tests exist in the codebase. No testing framework is configured."). Verification will be manual via the browser and server logs.
 
 ### Manual Verification (Per Feature)
 
@@ -411,9 +411,9 @@ Each feature will be verified by:
 
 #### Implementation Details:
 
-- **Backend**: Added `POST /session/:id/merge-all` to [local-ffmpeg-server.js](file:///c:/Users/Ashley/.gemini/antigravity/scratch/new-hyperedit/scripts/local-ffmpeg-server.js). It uses FFmpeg to segment and then concatenate clips using the `concat` demuxer.
-- **Frontend (UI)**: Added "Merge all clips" to Quick Actions in [AIPromptPanel.tsx](file:///c:/Users/Ashley/.gemini/antigravity/scratch/new-hyperedit/src/react-app/components/AIPromptPanel.tsx).
-- **Frontend (Logic)**: Implemented `handleMergeAll` in [Home.tsx](file:///c:/Users/Ashley/.gemini/antigravity/scratch/new-hyperedit/src/react-app/pages/Home.tsx) to gather clips, call the backend, and replace the timeline with the new merged asset.
+- **Backend**: Added `POST /session/:id/merge-all` to [local-ffmpeg-server.js](scripts/local-ffmpeg-server.js). It uses FFmpeg to segment and then concatenate clips using the `concat` demuxer.
+- **Frontend (UI)**: Added "Merge all clips" to Quick Actions in [AIPromptPanel.tsx](src/react-app/components/AIPromptPanel.tsx).
+- **Frontend (Logic)**: Implemented `handleMergeAll` in [Home.tsx](src/react-app/pages/Home.tsx) to gather clips, call the backend, and replace the timeline with the new merged asset.
 
 ---
 

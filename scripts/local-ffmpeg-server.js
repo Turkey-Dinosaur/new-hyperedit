@@ -7,6 +7,7 @@ import { randomUUID } from 'crypto';
 import formidable from 'formidable';
 import { GoogleGenAI } from '@google/genai';
 import { fal } from '@fal-ai/client';
+import { searchVideos as obsidianSearch, getVideoById as obsidianGetVideoById, copyFromLocalStorage as obsidianCopyFromStorage, getThumbnailPath as obsidianGetThumbnailPath, slugFromSummary as obsidianSlugFromSummary } from './obsidian-agent.js';
 
 // Load environment variables from .dev.vars
 function loadEnvVars() {
@@ -7816,6 +7817,159 @@ Use specific terms, concepts, and themes from the transcript.`;
   }
 }
 
+// POST /session/:id/obsidian/search — ranked keyword search over the video vault DB
+async function handleObsidianSearch(req, res, sessionId) {
+  const session = getSession(sessionId);
+  if (!session) {
+    res.writeHead(404, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+    res.end(JSON.stringify({ error: 'Session not found' }));
+    return;
+  }
+
+  let body = '';
+  req.on('data', (chunk) => { body += chunk; });
+  req.on('end', async () => {
+    try {
+      const { query, limit } = JSON.parse(body || '{}');
+      if (!query || !query.trim()) {
+        res.writeHead(400, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+        res.end(JSON.stringify({ error: 'query is required' }));
+        return;
+      }
+
+      const results = await obsidianSearch(query.trim(), limit || 8);
+
+      const enriched = results.map((r) => ({
+        ...r,
+        thumbnailUrl: r.hasLocalThumbnail ? `/obsidian/thumbnail/${encodeURIComponent(r.thumbnailSlug)}` : null,
+      }));
+
+      console.log(`[${sessionId}] [Obsidian] Search "${query}" → ${enriched.length} results`);
+      res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+      res.end(JSON.stringify({ results: enriched }));
+    } catch (err) {
+      console.error(`[${sessionId}] [Obsidian] Search error:`, err.message);
+      res.writeHead(500, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+      res.end(JSON.stringify({ error: err.message }));
+    }
+  });
+}
+
+// POST /session/:id/obsidian/import — copy selected videos from local storage into session
+async function handleObsidianImport(req, res, sessionId) {
+  const session = getSession(sessionId);
+  if (!session) {
+    res.writeHead(404, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+    res.end(JSON.stringify({ error: 'Session not found' }));
+    return;
+  }
+
+  let body = '';
+  req.on('data', (chunk) => { body += chunk; });
+  req.on('end', async () => {
+    try {
+      const { videoIds } = JSON.parse(body || '{}');
+      if (!Array.isArray(videoIds) || videoIds.length === 0) {
+        res.writeHead(400, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+        res.end(JSON.stringify({ error: 'videoIds array is required' }));
+        return;
+      }
+
+      const imported = [];
+      const failed = [];
+
+      for (const videoId of videoIds) {
+        try {
+          const video = await obsidianGetVideoById(videoId);
+          if (!video) {
+            failed.push({ videoId, error: 'Video not found in DB' });
+            continue;
+          }
+
+          const assetId = randomUUID();
+          const ext = (video.file_name.split('.').pop() || 'mp4').toLowerCase();
+          const assetPath = join(session.assetsDir, `${assetId}.${ext}`);
+
+          console.log(`[${sessionId}] [Obsidian] Copying ${video.file_name} from local storage...`);
+          await obsidianCopyFromStorage(video.file_name, assetPath);
+
+          const fileStats = statSync(assetPath);
+          const info = await getMediaInfo(assetPath);
+
+          // Use pre-rendered vault thumbnail if available, otherwise generate one
+          const thumbPath = join(session.assetsDir, `${assetId}-thumb.jpg`);
+          const vaultThumb = obsidianGetThumbnailPath(obsidianSlugFromSummary(video.summary, video.file_name));
+          if (vaultThumb && existsSync(vaultThumb)) {
+            try { copyFileSync(vaultThumb, thumbPath); } catch { /* fallback below */ }
+          }
+          if (!existsSync(thumbPath)) {
+            await generateThumbnail(assetPath, thumbPath, ext === 'jpg' || ext === 'png' || ext === 'gif');
+          }
+
+          const thumbnailUrl = existsSync(thumbPath)
+            ? `http://localhost:3333/session/${sessionId}/assets/${assetId}/thumbnail`
+            : null;
+
+          const asset = {
+            id: assetId,
+            type: info.duration > 0 ? 'video' : 'image',
+            filename: video.file_name,
+            duration: info.duration,
+            size: fileStats.size,
+            width: info.width,
+            height: info.height,
+            path: assetPath,
+            thumbPath: existsSync(thumbPath) ? thumbPath : null,
+            obsidianVideoId: videoId,
+          };
+
+          session.assets.set(assetId, asset);
+
+          imported.push({ assetId, videoId, fileName: video.file_name });
+          console.log(`[${sessionId}] [Obsidian] Imported ${video.file_name} as asset ${assetId}`);
+        } catch (err) {
+          console.error(`[${sessionId}] [Obsidian] Import failed for video ${videoId}:`, err.message);
+          failed.push({ videoId, error: err.message });
+        }
+      }
+
+      res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+      res.end(JSON.stringify({ imported, failed }));
+    } catch (err) {
+      console.error(`[${sessionId}] [Obsidian] Import error:`, err.message);
+      res.writeHead(500, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+      res.end(JSON.stringify({ error: err.message }));
+    }
+  });
+}
+
+// GET /obsidian/thumbnail/:slug — serve pre-rendered thumbnail from vault attachments
+async function handleObsidianThumbnail(req, res, slug) {
+  try {
+    const decoded = decodeURIComponent(slug);
+    // Guard against path traversal
+    if (decoded.includes('..') || decoded.includes('/') || decoded.includes('\\')) {
+      res.writeHead(400, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+      res.end(JSON.stringify({ error: 'Invalid slug' }));
+      return;
+    }
+
+    const thumbPath = obsidianGetThumbnailPath(decoded);
+    if (!thumbPath || !existsSync(thumbPath)) {
+      res.writeHead(404, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+      res.end(JSON.stringify({ error: 'Thumbnail not found' }));
+      return;
+    }
+
+    const stream = createReadStream(thumbPath);
+    res.writeHead(200, { 'Content-Type': 'image/jpeg', 'Access-Control-Allow-Origin': '*', 'Cache-Control': 'public, max-age=3600' });
+    stream.pipe(res);
+  } catch (err) {
+    res.writeHead(500, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+    res.end(JSON.stringify({ error: err.message }));
+  }
+}
+
 // Extract audio from video - creates separate audio asset and mutes the video
 async function handleExtractAudio(req, res, sessionId) {
   const session = getSession(sessionId);
@@ -9189,6 +9343,14 @@ const server = http.createServer(async (req, res) => {
       await handleProcessAsset(req, res, sessionId);
     }
 
+    // Obsidian agent: search video vault
+    else if (req.method === 'POST' && action === 'obsidian/search') {
+      await handleObsidianSearch(req, res, sessionId);
+    }
+    // Obsidian agent: import selected videos from local storage into session
+    else if (req.method === 'POST' && action === 'obsidian/import') {
+      await handleObsidianImport(req, res, sessionId);
+    }
     // Extract audio from video (creates audio asset + muted video)
     else if (req.method === 'POST' && action === 'extract-audio') {
       await handleExtractAudio(req, res, sessionId);
@@ -9236,6 +9398,13 @@ const server = http.createServer(async (req, res) => {
       res.writeHead(404, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ error: 'Session endpoint not found' }));
     }
+    return;
+  }
+
+  // Obsidian thumbnail: GET /obsidian/thumbnail/:slug
+  const obsidianThumbMatch = path.match(/^\/obsidian\/thumbnail\/(.+)$/);
+  if (obsidianThumbMatch && req.method === 'GET') {
+    await handleObsidianThumbnail(req, res, obsidianThumbMatch[1]);
     return;
   }
 

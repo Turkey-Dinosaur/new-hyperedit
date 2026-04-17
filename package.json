@@ -34,6 +34,7 @@
     "react-router": "^7.5.3",
     "remotion": "4.0.434",
     "three": "^0.182.0",
+    "pg": "^8.16.0",
     "zod": "^4.3.6"
   },
   "devDependencies": {
@@ -66,6 +67,8 @@
     "dev": "vite",
     "ffmpeg-server": "node scripts/local-ffmpeg-server.js",
     "knip": "knip",
-    "lint": "eslint ."
+    "lint": "eslint .",
+    "db:setup": "node --env-file=.dev.vars scripts/setup-obsidian-db.js",
+    "db:scan": "node --env-file=.dev.vars scripts/scan-videos.js"
   }
 }
