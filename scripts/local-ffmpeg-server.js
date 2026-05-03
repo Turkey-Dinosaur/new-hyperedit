@@ -34,6 +34,18 @@ if (process.env.FAL_API_KEY && !process.env.FAL_KEY) {
   process.env.FAL_KEY = process.env.FAL_API_KEY;
 }
 
+// Viral-script style guide (consumed by /auto-edit-full Pass 3).
+// Single source of truth shared with .claude/skills/viral-script-writer.
+const VIRAL_SCRIPT_STYLE_GUIDE = (() => {
+  const guidePath = join(process.cwd(), 'prompts', 'viral-script-style.md');
+  if (!existsSync(guidePath)) {
+    console.warn('[Server] prompts/viral-script-style.md not found — /auto-edit-full will not work until it exists.');
+    return null;
+  }
+  return readFileSync(guidePath, 'utf-8');
+})();
+const VIRAL_VOICE_ID = 'wUkGqD7qevNIshEdEC5s';
+
 const PORT = 3333;
 const TEMP_DIR = join(tmpdir(), 'hyperedit-ffmpeg');
 const OLD_SESSIONS_DIR = join(TEMP_DIR, 'sessions');
@@ -8178,7 +8190,172 @@ async function checkFastConcatCompatibility(session, clips) {
 // ============================================================
 // USE TEMPLATE — Intelligent Auto-Edit
 // ============================================================
-async function handleUseTemplate(req, res, sessionId) {
+// ── Pass 3: viral-script generator ──
+// Generates a script in the user's style based on the cut plan + content analysis.
+async function generateViralScript(ai, contentAnalysis, validDecisions, totalDuration, scenes) {
+  if (!VIRAL_SCRIPT_STYLE_GUIDE) {
+    throw new Error('Style guide prompts/viral-script-style.md is missing');
+  }
+
+  const targetWords = Math.round(totalDuration * 2.5); // ≈150 wpm TTS pace
+  const decisionsBrief = validDecisions.map((d, i) => {
+    const scene = scenes[d.sceneIndex] || {};
+    return `${i}. ${d.templateSection || d.position || 'middle'} — ${(d.clipDuration || 0).toFixed(1)}s — ${d.reason || ''}`;
+  }).join('\n');
+
+  const userPrompt = `A video has been cut according to the plan below. Write a script that will be read aloud (by ElevenLabs TTS) over this edit.
+
+CONTENT ANALYSIS:
+- Type: ${contentAnalysis.content_type || 'restoration'}
+- Narrative arc: ${contentAnalysis.narrative_arc || 'before → process → after'}
+- Pacing: ${contentAnalysis.pacing_recommendation || 'fast, satisfying'}
+- Key moments: ${(contentAnalysis.key_moments || []).map(m => m.description).filter(Boolean).slice(0, 6).join('; ') || '(none captured)'}
+
+EDIT PLAN (${validDecisions.length} segments, ${totalDuration.toFixed(1)}s total):
+${decisionsBrief}
+
+Target script length: ~${targetWords} words (so the spoken voiceover lands close to ${totalDuration.toFixed(0)} seconds).
+
+Return JSON: { "fullScript": "...the script as a single plain-text block, no labels...", "segments": [{ "decisionIndex": number, "text": "..." }] }
+The segments array should give one chunk of the script per edit decision in the same order. fullScript should equal segments concatenated with single spaces.`;
+
+  const response = await ai.models.generateContent({
+    model: 'gemini-2.5-flash',
+    contents: [{ role: 'user', parts: [{ text: userPrompt }] }],
+    config: {
+      systemInstruction: VIRAL_SCRIPT_STYLE_GUIDE,
+      responseMimeType: 'application/json',
+    },
+  });
+
+  let text = '';
+  if (typeof response.text === 'function') {
+    text = await response.text();
+  } else if (response.text) {
+    text = response.text;
+  } else if (response.candidates?.[0]?.content?.parts?.[0]?.text) {
+    text = response.candidates[0].content.parts[0].text;
+  }
+
+  let parsed;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    const match = (text || '').match(/\{[\s\S]*\}/);
+    parsed = match ? JSON.parse(match[0]) : null;
+  }
+  if (!parsed || !parsed.fullScript) {
+    throw new Error('Pass 3 returned no script');
+  }
+  return {
+    fullScript: parsed.fullScript,
+    segments: Array.isArray(parsed.segments) ? parsed.segments : [],
+  };
+}
+
+// ── ElevenLabs TTS with word-level alignment ──
+// Returns { assetId, duration, words } and writes an MP3 + meta into the session.
+async function synthesizeWithElevenLabs(text, voiceId, sessionId, session) {
+  const apiKey = process.env.ELEVENLABS_API_KEY;
+  if (!apiKey) throw new Error('ELEVENLABS_API_KEY not configured');
+  if (!text || !text.trim()) throw new Error('Empty script — nothing to synthesize');
+
+  const url = `https://api.elevenlabs.io/v1/text-to-speech/${voiceId}/with-timestamps`;
+  const reqBody = {
+    text,
+    model_id: 'eleven_turbo_v2_5',
+    output_format: 'mp3_44100_128',
+  };
+
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: {
+      'xi-api-key': apiKey,
+      'Content-Type': 'application/json',
+      'Accept': 'application/json',
+    },
+    body: JSON.stringify(reqBody),
+  });
+
+  if (!response.ok) {
+    const errText = await response.text().catch(() => '');
+    throw new Error(`ElevenLabs ${response.status}: ${errText.slice(0, 300)}`);
+  }
+
+  const data = await response.json();
+  if (!data.audio_base64) throw new Error('ElevenLabs returned no audio');
+
+  // Save MP3
+  const audioAssetId = randomUUID();
+  const audioPath = join(session.assetsDir, `${audioAssetId}.mp3`);
+  writeFileSync(audioPath, Buffer.from(data.audio_base64, 'base64'));
+
+  // Probe duration
+  let audioDuration = 0;
+  try {
+    const durStr = await runFFmpegProbe(
+      ['-v', 'error', '-show_entries', 'format=duration', '-of', 'default=noprint_wrappers=1:nokey=1', audioPath],
+      'elevenlabs-probe'
+    );
+    audioDuration = parseFloat(durStr.trim()) || 0;
+  } catch (e) {
+    console.warn('[ElevenLabs] Duration probe failed:', e.message);
+  }
+
+  // Convert character-level alignment → word-level
+  const align = data.alignment || {};
+  const chars = align.characters || [];
+  const starts = align.character_start_times_seconds || [];
+  const ends = align.character_end_times_seconds || [];
+  const words = [];
+  let curWord = '';
+  let curStart = null;
+  let curEnd = null;
+  const flush = () => {
+    if (curWord) {
+      words.push({ text: curWord, start: curStart ?? 0, end: curEnd ?? 0 });
+      curWord = '';
+      curStart = null;
+      curEnd = null;
+    }
+  };
+  for (let i = 0; i < chars.length; i++) {
+    const c = chars[i];
+    if (/\s/.test(c)) {
+      flush();
+    } else {
+      if (curStart === null) curStart = starts[i];
+      curEnd = ends[i];
+      curWord += c;
+    }
+  }
+  flush();
+
+  // Register asset
+  const stats = statSync(audioPath);
+  const audioAsset = {
+    id: audioAssetId,
+    type: 'audio',
+    filename: `voiceover-${audioAssetId.slice(0, 8)}.mp3`,
+    path: audioPath,
+    thumbPath: null,
+    duration: audioDuration,
+    size: stats.size,
+    createdAt: Date.now(),
+    aiGenerated: true,
+  };
+  session.assets.set(audioAssetId, audioAsset);
+
+  return {
+    assetId: audioAssetId,
+    duration: audioDuration,
+    words,
+    streamUrl: `/session/${sessionId}/assets/${audioAssetId}/stream`,
+    filename: audioAsset.filename,
+  };
+}
+
+async function handleUseTemplate(req, res, sessionId, options = {}) {
   const session = getSession(sessionId);
   if (!session) {
     res.writeHead(404, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
@@ -8187,7 +8364,7 @@ async function handleUseTemplate(req, res, sessionId) {
   }
 
   const body = await parseBody(req);
-  const { assetId } = body;
+  let { assetId } = body;
 
   if (!assetId) {
     res.writeHead(400, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
@@ -8195,7 +8372,7 @@ async function handleUseTemplate(req, res, sessionId) {
     return;
   }
 
-  const videoAsset = session.assets.get(assetId);
+  let videoAsset = session.assets.get(assetId);
   if (!videoAsset) {
     res.writeHead(404, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
     res.end(JSON.stringify({ error: 'Asset not found' }));
@@ -8259,8 +8436,40 @@ async function handleUseTemplate(req, res, sessionId) {
   // Background processing
   (async () => {
     try {
-      console.log(`\n[${jobId}] === AUTO-EDIT (USE TEMPLATE) ===`);
+      console.log(`\n[${jobId}] === AUTO-EDIT (USE TEMPLATE${options.runVoiceover ? ' + VOICEOVER' : ''}) ===`);
       console.log(`[${jobId}] Asset: ${videoAsset.filename} (${videoDuration.toFixed(1)}s)`);
+
+      // ── Step A: Mute source (auto-edit-full only) ──
+      // Strip audio so the AI voiceover plays clean over the cut V1 clips.
+      if (options.runVoiceover) {
+        updateProgress(1, 'Silencing original audio...');
+        const mutedAssetId = randomUUID();
+        const mutedPath = join(session.assetsDir, `${mutedAssetId}.mp4`);
+        try {
+          await runFFmpeg(['-y', '-i', videoAsset.path, '-c:v', 'copy', '-an', mutedPath], jobId);
+          const stats = statSync(mutedPath);
+          const mutedAsset = {
+            id: mutedAssetId,
+            type: 'video',
+            filename: `muted-${videoAsset.filename}`,
+            path: mutedPath,
+            thumbPath: videoAsset.thumbPath || null,
+            duration: videoAsset.duration,
+            size: stats.size,
+            width: videoAsset.width || 1920,
+            height: videoAsset.height || 1080,
+            createdAt: Date.now(),
+            sourceAssetId: assetId,
+            aiGenerated: true,
+          };
+          session.assets.set(mutedAssetId, mutedAsset);
+          videoAsset = mutedAsset;
+          assetId = mutedAssetId;
+          console.log(`[${jobId}] Muted source created: ${mutedAssetId}`);
+        } catch (muteErr) {
+          console.error(`[${jobId}] Mute step failed (continuing with original audio):`, muteErr.message);
+        }
+      }
 
       // ── Step B: Scene Detection ──
       updateProgress(2, 'Detecting scene changes...');
@@ -8476,7 +8685,10 @@ ${sceneList}
 (Total: ${videoDuration.toFixed(0)}s across ${scenes.length} scenes)
 
 EDITING TEMPLATE — follow this structure as closely as the source footage allows:
-  00:00 – 00:03  Quick-fire series of before shots (unrestored / raw state)
+  00:00 – 00:01  Before shot #1 (unrestored / raw state, 1 second exactly)
+  00:01 – 00:02  Before shot #2 (different angle of the damage, 1 second exactly)
+  00:02 – 00:03  Before shot #3 (third angle / close-up of worst damage, 1 second exactly)
+  Quick-fire rule: the first three segments MUST each be exactly 1 second, each from a DIFFERENT scene showing the unrestored worktop. Use trimStart/trimEnd to clip them to 1s if the source scene is longer. Do not collapse them into a single longer shot — three distinct 1-second cuts is the hook.
   00:03 – 00:06  Timelapse of tool setup
   00:06 – 00:08  Sip of drink / brief pause moment
   00:08 – 00:23  Sanding timelapse (first pass)
@@ -8745,7 +8957,7 @@ Return JSON: { "editDecisions": [...], "estimatedDuration": number, "editingNote
         }
       }
 
-      console.log(`[${jobId}] === AUTO-EDIT COMPLETE ===`);
+      console.log(`[${jobId}] === AUTO-EDIT CUTS COMPLETE ===`);
       console.log(`[${jobId}] Output: ${validDecisions.length} clips, ${totalDuration.toFixed(1)}s total`);
       console.log(`[${jobId}] Content type: ${contentAnalysis.content_type || 'unknown'}`);
 
@@ -8754,6 +8966,25 @@ Return JSON: { "editDecisions": [...], "estimatedDuration": number, "editingNote
         const { rmSync } = await import('fs');
         rmSync(framesDir, { recursive: true, force: true });
       } catch { /* cleanup optional */ }
+
+      // ── Pass 3: viral script (auto-edit-full only) ──
+      // Audio synthesis is now manual: the frontend shows the script in a modal
+      // and the user uploads their own voiceover file. See handleAutoEditFull.
+      let scriptResult = null;
+      if (options.runVoiceover) {
+        try {
+          updateProgress(96, 'Writing viral script...');
+          scriptResult = await generateViralScript(ai, contentAnalysis, validDecisions, totalDuration, scenes);
+          console.log(`[${jobId}] Pass 3 script: ${scriptResult.fullScript.split(/\s+/).length} words`);
+        } catch (vErr) {
+          console.error(`[${jobId}] Script generation failed:`, vErr.message);
+          job.status = 'failed';
+          job.error = `Script generation failed: ${vErr.message}`;
+          return;
+        }
+      }
+
+      console.log(`[${jobId}] === AUTO-EDIT COMPLETE ===`);
 
       job.status = 'completed';
       job.progress = 100;
@@ -8780,6 +9011,7 @@ Return JSON: { "editDecisions": [...], "estimatedDuration": number, "editingNote
         },
         totalDuration,
         editingNotes,
+        ...(scriptResult ? { script: scriptResult } : {}),
       };
 
     } catch (err) {
@@ -9383,9 +9615,13 @@ const server = http.createServer(async (req, res) => {
     else if (req.method === 'POST' && action === 'giphy/add') {
       await handleGiphyAdd(req, res, sessionId);
     }
-    // Auto-edit (Use Template)
+    // Auto-edit (Use Template) — cuts only, keeps original audio
     else if (req.method === 'POST' && action === 'use-template') {
-      await handleUseTemplate(req, res, sessionId);
+      await handleUseTemplate(req, res, sessionId, { runVoiceover: false });
+    }
+    // Auto-edit Full — cuts + viral script + ElevenLabs voiceover
+    else if (req.method === 'POST' && action === 'auto-edit-full') {
+      await handleUseTemplate(req, res, sessionId, { runVoiceover: true });
     }
     // Generic job progress polling
     else if (req.method === 'GET' && action.startsWith('job-progress/')) {
@@ -9466,5 +9702,7 @@ server.listen(PORT, () => {
   console.log(`   POST /session/:id/generate-contextual-animation - Content-aware animation (transcribes video first)`);
   console.log(`   POST /session/:id/process-asset - Apply FFmpeg command to an asset`);
   console.log(`   POST /session/:id/merge-all - Merges all clips into one video asset`);
+  console.log(`   POST /session/:id/use-template - Auto-edit (cuts only, keeps original audio)`);
+  console.log(`   POST /session/:id/auto-edit-full - Auto-edit + viral script + ElevenLabs voiceover`);
   console.log(`\n   GET /health - Health check\n`);
 });

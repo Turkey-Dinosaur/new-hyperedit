@@ -180,7 +180,7 @@ interface AIPromptPanelProps {
   onGenerateBatchAnimations?: (count: number) => Promise<{ animations: BatchAnimationResult[]; videoDuration: number }>;
   onExtractAudio?: () => Promise<ExtractAudioResult>;
   onAutoOrder?: () => Promise<void>;
-  onMergeAll?: (onProgress?: (status: string) => void) => Promise<void>;
+  onMergeAll?: (onProgress?: (status: string) => void) => Promise<{ assetId: string; duration: number }>;
   onUseTemplate?: (onProgress?: (status: string) => void) => Promise<{ totalDuration: number; editDecisions: { reason: string }[]; contentAnalysis: { content_type: string }; editingNotes: string }>;
   onOpenAnimationInTab?: (assetId: string, animationName: string) => string | undefined;
   onEditAnimation?: (assetId: string, editPrompt: string, v1Context?: EditTabV1Context, tabIdToUpdate?: string) => Promise<{ assetId: string; duration: number; sceneCount: number }>;

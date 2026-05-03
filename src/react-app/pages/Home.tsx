@@ -12,6 +12,7 @@ import ObsidianPanel from '@/react-app/components/ObsidianPanel';
 import GifSearchPanel from '@/react-app/components/GifSearchPanel';
 import FileBrowserPanel from '@/react-app/components/FileBrowserPanel';
 import ExportModal from '@/react-app/components/ExportModal';
+import { VoiceoverModal } from '@/react-app/components/VoiceoverModal';
 import ResizablePanel from '@/react-app/components/ResizablePanel';
 import ResizableVerticalPanel from '@/react-app/components/ResizableVerticalPanel';
 import TimelineTabs from '@/react-app/components/TimelineTabs';
@@ -43,6 +44,11 @@ export default function Home() {
   const [activeAgent, setActiveAgent] = useState<'director' | 'picasso' | 'dicaprio' | 'obsidian'>('director');
   const [showGifSearch, setShowGifSearch] = useState(false);
   const [showFileBrowser, setShowFileBrowser] = useState(false);
+  const [voiceoverModalState, setVoiceoverModalState] = useState<{
+    script: string;
+    onSubmit: (file: File) => void;
+    onCancel: () => void;
+  } | null>(null);
   const [showTextOverlayModal, setShowTextOverlayModal] = useState(false);
   const [textOverlayInput, setTextOverlayInput] = useState('');
   const [exportModal, setExportModal] = useState<{
@@ -1817,8 +1823,8 @@ export default function Home() {
 
     const { jobId } = await response.json();
 
-    // Polling loop
-    return new Promise<void>((resolve, reject) => {
+    // Polling loop — resolves with the merged asset so callers can chain.
+    return new Promise<{ assetId: string; duration: number }>((resolve, reject) => {
       const pollInterval = setInterval(async () => {
         try {
           const res = await fetch(`http://localhost:3333/session/${session.sessionId}/merge-progress/${jobId}`);
@@ -1854,7 +1860,7 @@ export default function Home() {
 
             await saveProject();
             setCurrentTime(0);
-            resolve();
+            resolve({ assetId: job.asset.id, duration: job.asset.duration });
           } else if (job.status === 'failed') {
             clearInterval(pollInterval);
             reject(new Error(job.error || 'Merge failed during background processing'));
@@ -1871,100 +1877,209 @@ export default function Home() {
     });
   }, [session, clips, assets, activeTabId, timelineTabs, refreshAssets, setClips, saveProject, updateTabClips]);
 
-  // Handle auto-edit (Use Template) — flagship feature
-  const handleUseTemplate = useCallback(async (onProgress?: (status: string) => void) => {
+  // Full Auto Edit pipeline: order → merge → AI cuts → viral script → ElevenLabs voiceover → captions.
+  // Server pipeline lives in scripts/local-ffmpeg-server.js handleUseTemplate (with options.runVoiceover=true).
+  const handleAutoEditFull = useCallback(async (onProgress?: (status: string) => void): Promise<{ totalDuration: number; editDecisions: { reason: string }[]; contentAnalysis: { content_type: string }; editingNotes: string }> => {
     if (!session?.sessionId) {
       throw new Error('Please upload a video first to start a session');
     }
 
-    const activeClips = activeTabId === 'main' ? clips : (timelineTabs.find(t => t.id === activeTabId)?.clips || []);
-    const v1Clip = activeClips.find(c => c.trackId === 'V1');
-    if (!v1Clip) {
-      throw new Error('No video on the V1 track. Please add a video first.');
-    }
+    onProgress?.('Auto-ordering clips by filename...');
+    await handleAutoOrder();
 
-    // Step 1: Start the job (returns 202 + jobId)
-    const response = await fetch(
-      `http://localhost:3333/session/${session.sessionId}/use-template`,
+    onProgress?.('Merging clips into single timeline...');
+    const merged = await handleMergeAll(onProgress);
+
+    onProgress?.('Starting auto-edit + voiceover...');
+    const startRes = await fetch(
+      `http://localhost:3333/session/${session.sessionId}/auto-edit-full`,
       {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ assetId: v1Clip.assetId }),
+        body: JSON.stringify({ assetId: merged.assetId }),
       }
     );
-    if (!response.ok) {
-      const error = await response.json();
-      throw new Error(error.error || 'Failed to start auto-edit');
+    if (!startRes.ok) {
+      const error = await startRes.json().catch(() => ({}));
+      throw new Error(error.error || 'Failed to start auto-edit-full');
     }
-    const { jobId } = await response.json();
+    const { jobId } = await startRes.json();
+    if (!jobId) throw new Error('No job ID returned from server');
 
-    if (!jobId) {
-      throw new Error('No job ID returned from server');
-    }
+    const sessionId = session.sessionId;
 
-    // Step 2: Poll for completion
-    return new Promise<{ totalDuration: number; editDecisions: { reason: string }[]; contentAnalysis: { content_type: string }; editingNotes: string }>((resolve, reject) => {
-      const pollInterval = setInterval(async () => {
+    // Poll a server job until it resolves; handles both /job-progress and /merge-progress.
+    const pollJob = <T,>(progressUrl: string, fallbackLabel: string) => new Promise<T>((resolve, reject) => {
+      const interval = setInterval(async () => {
         try {
-          const res = await fetch(
-            `http://localhost:3333/session/${session.sessionId}/job-progress/${jobId}`
-          );
+          const res = await fetch(progressUrl);
           if (!res.ok) throw new Error('Failed to fetch job progress');
-          const job = await res.json();
-
-          if (job.status === 'completed') {
-            clearInterval(pollInterval);
-            const data = job.result;
-
-            // Refresh assets so new timelapse assets are available
-            await refreshAssets();
-
-            // Record undo snapshot before modifying timeline
-            recordSnapshot();
-
-            // Keep non-V1 clips, rebuild V1 from edit decisions
-            const otherClips = activeClips.filter(c => c.trackId !== 'V1');
-            let timelinePos = 0;
-            const newV1Clips = (data.editDecisions || []).map((d: { assetId: string; clipInPoint: number; clipOutPoint: number; clipDuration: number }) => {
-              const clip = {
-                id: crypto.randomUUID(),
-                assetId: d.assetId,
-                trackId: 'V1' as const,
-                start: timelinePos,
-                duration: d.clipDuration,
-                inPoint: d.clipInPoint,
-                outPoint: d.clipOutPoint,
-              };
-              timelinePos += d.clipDuration;
-              return clip;
-            });
-
-            const allClips = [...otherClips, ...newV1Clips];
-            if (activeTabId !== 'main') {
-              updateTabClips(activeTabId, allClips);
-            } else {
-              setClips(allClips);
-            }
-
-            setCurrentTime(0);
-            await saveProject();
-            resolve(data);
-          } else if (job.status === 'failed') {
-            clearInterval(pollInterval);
-            reject(new Error(job.error || 'Auto-edit failed'));
+          const j = await res.json();
+          if (j.status === 'completed') {
+            clearInterval(interval);
+            resolve(j as T);
+          } else if (j.status === 'failed') {
+            clearInterval(interval);
+            reject(new Error(j.error || `${fallbackLabel} failed`));
           } else if (onProgress) {
-            const etaText = job.etaSeconds > 0
-              ? ` (Est. ${job.etaSeconds > 60 ? Math.round(job.etaSeconds / 60) + 'm' : job.etaSeconds + 's'} remaining)`
+            const etaText = j.etaSeconds > 0
+              ? ` (Est. ${j.etaSeconds > 60 ? Math.round(j.etaSeconds / 60) + 'm' : j.etaSeconds + 's'} remaining)`
               : '';
-            onProgress(`${job.statusMessage || 'Processing...'} ${job.progress}%${etaText}`);
+            onProgress(`${j.statusMessage || fallbackLabel} ${j.progress ?? 0}%${etaText}`);
           }
         } catch (err) {
-          clearInterval(pollInterval);
+          clearInterval(interval);
           reject(err);
         }
       }, 1000);
     });
-  }, [session, clips, activeTabId, timelineTabs, refreshAssets, recordSnapshot, setClips, updateTabClips, saveProject, setCurrentTime]);
+
+    type AutoEditResult = {
+      status: string;
+      result: {
+        editDecisions: Array<{ assetId: string; clipInPoint: number; clipOutPoint: number; clipDuration: number }>;
+        totalDuration: number;
+        editingNotes: string;
+        contentAnalysis: { content_type: string };
+        script?: { fullScript: string };
+      };
+    };
+    const autoEditJob = await pollJob<AutoEditResult>(
+      `http://localhost:3333/session/${sessionId}/job-progress/${jobId}`,
+      'Processing...'
+    );
+    const data = autoEditJob.result;
+
+    // ── Manual voiceover step: show script in modal, wait for user audio upload ──
+    if (!data.script?.fullScript) {
+      throw new Error('Auto-edit returned no script');
+    }
+    onProgress?.('Awaiting voiceover audio...');
+    const audioFile = await new Promise<File>((resolve, reject) => {
+      setVoiceoverModalState({
+        script: data.script!.fullScript,
+        onSubmit: (file) => {
+          setVoiceoverModalState(null);
+          resolve(file);
+        },
+        onCancel: () => {
+          setVoiceoverModalState(null);
+          reject(new Error('Voiceover step cancelled'));
+        },
+      });
+    });
+
+    onProgress?.('Uploading voiceover...');
+    const audioAsset = await uploadAsset(audioFile);
+
+    onProgress?.('Transcribing voiceover for captions...');
+    const transcribeRes = await fetch(`http://localhost:3333/session/${sessionId}/transcribe`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ assetId: audioAsset.id }),
+    });
+    if (!transcribeRes.ok) {
+      const err = await transcribeRes.json().catch(() => ({}));
+      throw new Error(err.error || 'Failed to transcribe voiceover');
+    }
+    const { words: voiceoverWords } = await transcribeRes.json() as { words: Array<{ text: string; start: number; end: number }> };
+
+    // ── Merge the edited segments into a single V1 video ──
+    onProgress?.('Stitching edit into a single video...');
+    const mergeData = (data.editDecisions || []).map(d => ({
+      assetId: d.assetId,
+      inPoint: d.clipInPoint,
+      duration: d.clipDuration,
+    }));
+    if (mergeData.length === 0) {
+      throw new Error('Auto-edit returned no segments to merge');
+    }
+    const mergeStartRes = await fetch(`http://localhost:3333/session/${sessionId}/merge-all`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ clips: mergeData }),
+    });
+    if (!mergeStartRes.ok) {
+      const err = await mergeStartRes.json().catch(() => ({}));
+      throw new Error(err.error || 'Failed to start final merge');
+    }
+    const { jobId: mergeJobId } = await mergeStartRes.json();
+    type MergeResult = { status: string; asset: { id: string; duration: number } };
+    const mergeJob = await pollJob<MergeResult>(
+      `http://localhost:3333/session/${sessionId}/merge-progress/${mergeJobId}`,
+      'Stitching final video...'
+    );
+
+    await refreshAssets();
+    recordSnapshot();
+
+    const mergedV1Clip: TimelineClip = {
+      id: crypto.randomUUID(),
+      assetId: mergeJob.asset.id,
+      trackId: 'V1',
+      start: 0,
+      duration: mergeJob.asset.duration,
+      inPoint: 0,
+      outPoint: mergeJob.asset.duration,
+    };
+
+    const voiceoverClip: TimelineClip = {
+      id: crypto.randomUUID(),
+      assetId: audioAsset.id,
+      trackId: 'A1',
+      start: 0,
+      duration: audioAsset.duration,
+      inPoint: 0,
+      outPoint: audioAsset.duration,
+    };
+
+    const allClips = [mergedV1Clip, voiceoverClip];
+    if (activeTabId !== 'main') {
+      updateTabClips(activeTabId, allClips);
+    } else {
+      setClips(allClips);
+    }
+
+    // Captions on T1, chunked from Whisper transcription of the user's voiceover.
+    if (voiceoverWords && voiceoverWords.length > 0) {
+      type Word = { text: string; start: number; end: number };
+      const PAUSE_THRESHOLD = 0.7;
+      const MAX_WORDS_PER_CHUNK = 5;
+      const chunks: Array<{ words: Word[]; start: number; end: number }> = [];
+      let currentChunk: Word[] = [];
+      for (let i = 0; i < voiceoverWords.length; i++) {
+        const word: Word = voiceoverWords[i];
+        const prevWord: Word | undefined = voiceoverWords[i - 1];
+        const hasSignificantPause = prevWord && (word.start - prevWord.end) >= PAUSE_THRESHOLD;
+        const chunkIsFull = currentChunk.length >= MAX_WORDS_PER_CHUNK;
+        if (currentChunk.length > 0 && (hasSignificantPause || chunkIsFull)) {
+          chunks.push({ words: currentChunk, start: currentChunk[0].start, end: currentChunk[currentChunk.length - 1].end });
+          currentChunk = [];
+        }
+        currentChunk.push(word);
+      }
+      if (currentChunk.length > 0) {
+        chunks.push({ words: currentChunk, start: currentChunk[0].start, end: currentChunk[currentChunk.length - 1].end });
+      }
+
+      const captionsToAdd = chunks.map(chunk => ({
+        words: chunk.words.map(w => ({ text: w.text, start: w.start - chunk.start, end: w.end - chunk.start })),
+        start: chunk.start,
+        duration: chunk.end - chunk.start,
+        style: {},
+      }));
+      addCaptionClipsBatch(captionsToAdd);
+    }
+
+    setCurrentTime(0);
+    await saveProject();
+    return {
+      totalDuration: data.totalDuration,
+      editDecisions: (data.editDecisions || []).map(() => ({ reason: '' })),
+      contentAnalysis: data.contentAnalysis || { content_type: 'unknown' },
+      editingNotes: data.editingNotes || '',
+    };
+  }, [session, activeTabId, refreshAssets, recordSnapshot, setClips, updateTabClips, saveProject, setCurrentTime, handleAutoOrder, handleMergeAll, addCaptionClipsBatch, uploadAsset]);
 
   // Handle contextual animation creation (uses video content to inform the animation)
   const handleCreateContextualAnimation = useCallback(async (request: {
@@ -2555,7 +2670,7 @@ export default function Home() {
                   onExtractAudio={handleExtractAudio}
                   onAutoOrder={handleAutoOrder}
                   onMergeAll={handleMergeAll}
-                  onUseTemplate={handleUseTemplate}
+                  onUseTemplate={handleAutoEditFull}
                   onCreateContextualAnimation={handleCreateContextualAnimation}
                   onOpenAnimationInTab={handleOpenAnimationInTab}
                   onEditAnimation={handleEditAnimation}
@@ -2618,6 +2733,15 @@ export default function Home() {
           sessionId={session.sessionId}
           onClose={() => setShowFileBrowser(false)}
           onImported={handleFilesImported}
+        />
+      )}
+
+      {/* Voiceover Modal — shown after auto-edit script is generated */}
+      {voiceoverModalState && (
+        <VoiceoverModal
+          script={voiceoverModalState.script}
+          onSubmit={voiceoverModalState.onSubmit}
+          onCancel={voiceoverModalState.onCancel}
         />
       )}
 

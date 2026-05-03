@@ -37,6 +37,11 @@ See [SETUP.md](./SETUP.md) for full instructions including FFmpeg, Python/Whispe
 - Quick Actions for common tasks: dead air removal, timelapse, auto-edit, and more
 - Reads your timeline before making suggestions
 
+> **Note — Auto-Edit is opinionated by default.**
+> The "Auto-Edit (Use Template)" feature uses two Gemini prompts in `scripts/local-ffmpeg-server.js`. The first pass (around line 8402) is generic content analysis. The second pass (around line 8469) contains a hardcoded editing template that was written for **worktop restoration videos** — it structures the output around before shots, sanding timelapses, oil application, and a client reveal.
+>
+> To tailor auto-edit to your own content, edit the `pass2Prompt` string starting at line 8469. Replace the `EDITING TEMPLATE` section with your own structure — describe your preferred shot order, section durations, and any content-specific rules. The `pass1Prompt` (line 8402) rarely needs changing unless you want Gemini to extract different metadata from the footage.
+
 ### Captions
 - One-click transcription via local OpenAI Whisper (free, word-level timestamps)
 - Three-tier fallback: local Whisper → OpenAI API → Gemini

@@ -128,6 +128,28 @@ Required in `.dev.vars` for local development:
 - `FAL_API_KEY` - fal.ai for Picasso/DiCaprio (note: server aliases this to `FAL_KEY` for the fal.ai SDK)
 - `GIPHY_API_KEY` - GIF search
 - `OPENAI_API_KEY` - Additional AI features
+- `ELEVENLABS_API_KEY` - ElevenLabs TTS for the Auto-Edit Full pipeline (voice ID hardcoded as `wUkGqD7qevNIshEdEC5s`)
+
+## Auto-Edit Full Pipeline
+
+The Auto Edit button in `AIPromptPanel` triggers `handleAutoEditFull` in `Home.tsx`, which chains:
+
+1. `handleAutoOrder` — sorts raw clips on each track by filename timestamps
+2. `handleMergeAll` — merges all video clips into a single V1 asset (server: `POST /session/:id/merge-all`)
+3. `POST /session/:id/auto-edit-full` — server-side, this is `handleUseTemplate` invoked with `{ runVoiceover: true }`. Steps inside the IIFE:
+   1. Mute the source (ffmpeg `-c:v copy -an`) so the user's voiceover plays clean
+   2. Existing pipeline: scene detect → frame extract → Gemini Pass 1 (content analysis) → Pass 2 (edit decisions) → timelapse asset creation
+   3. Pass 3: `generateViralScript()` calls Gemini with `prompts/viral-script-style.md` as the system instruction
+   4. Returns the script in the job result; **TTS is not done server-side**.
+4. Frontend shows `VoiceoverModal` with the generated script (copy button + audio file picker). User records/generates the voiceover externally and uploads the MP3.
+5. Frontend uploads the audio via `uploadAsset`, then calls `POST /session/:id/transcribe` (Whisper) to get word-level timing.
+6. Frontend stitches the edit decisions into a single V1 video by calling `/merge-all` again, then drops the merged V1 clip + uploaded audio on A1 + Whisper-aligned captions on T1 (chunked via the 5-word / 0.7s-pause rule).
+
+A `synthesizeWithElevenLabs()` helper still exists in `local-ffmpeg-server.js` and the `ELEVENLABS_API_KEY` env var is still read but no caller invokes it. Re-enable by calling it from the auto-edit-full IIFE if you want to revive the API path.
+
+**Style guide source of truth**: `prompts/viral-script-style.md`. Also referenced by the `viral-script-writer` Claude Code skill at `.claude/skills/viral-script-writer/SKILL.md`. Edit the markdown to change the voice; both consumers pick it up automatically (skill at invocation, server at startup).
+
+The legacy `POST /session/:id/use-template` endpoint is preserved for a future "cuts only, keep my voice" mode but has no UI in v1.
 
 ## AI Agents
 
