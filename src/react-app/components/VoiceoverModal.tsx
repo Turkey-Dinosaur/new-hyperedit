@@ -1,13 +1,14 @@
 import { useRef, useState } from 'react';
-import { Copy, Check, X, Upload } from 'lucide-react';
+import { Copy, Check, X, Upload, SkipForward } from 'lucide-react';
 
 interface VoiceoverModalProps {
   script: string;
   onSubmit: (file: File) => void;
   onCancel: () => void;
+  onSkip?: () => void;
 }
 
-export function VoiceoverModal({ script, onSubmit, onCancel }: VoiceoverModalProps) {
+export function VoiceoverModal({ script, onSubmit, onCancel, onSkip }: VoiceoverModalProps) {
   const [audioFile, setAudioFile] = useState<File | null>(null);
   const [copied, setCopied] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -103,6 +104,15 @@ export function VoiceoverModal({ script, onSubmit, onCancel }: VoiceoverModalPro
           >
             Cancel
           </button>
+          {onSkip && (
+            <button
+              onClick={onSkip}
+              className="flex items-center gap-1.5 px-4 py-2 rounded-lg text-sm text-zinc-300 hover:text-white hover:bg-zinc-800 border border-zinc-700 hover:border-zinc-600 transition-colors"
+            >
+              <SkipForward className="w-3.5 h-3.5" />
+              Skip
+            </button>
+          )}
           <button
             onClick={handleSubmit}
             disabled={!audioFile}

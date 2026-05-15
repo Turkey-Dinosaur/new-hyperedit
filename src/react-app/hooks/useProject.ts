@@ -15,6 +15,7 @@ export interface Asset {
   thumbnailUrl: string | null;
   streamUrl?: string; // URL with cache-busting timestamp
   aiGenerated?: boolean; // True if this is a Remotion-generated animation
+  linked?: boolean; // True if imported by reference (original file not copied)
 }
 
 // TimelineClip - instance on timeline
@@ -26,6 +27,8 @@ export interface TimelineClip {
   duration: number;
   inPoint: number;
   outPoint: number;
+  speed?: number;
+  volume?: number;
   transform?: {
     x?: number;
     y?: number;
@@ -433,6 +436,7 @@ export function useProject() {
         height: a.height,
         thumbnailUrl: a.thumbnailUrl ? `${LOCAL_FFMPEG_URL}${a.thumbnailUrl}` : null,
         streamUrl: a.streamUrl ? `${LOCAL_FFMPEG_URL}${a.streamUrl}` : undefined,
+        linked: Boolean(a.linked),
       }));
 
       setAssets(prev => [...prev, ...newAssets]);
@@ -481,6 +485,7 @@ export function useProject() {
       height?: number;
       thumbnailUrl?: string | null;
       aiGenerated?: boolean;
+      linked?: boolean;
     }) => ({
       id: a.id,
       type: a.type,
@@ -496,6 +501,7 @@ export function useProject() {
       streamUrl: `${LOCAL_FFMPEG_URL}/session/${session.sessionId}/assets/${a.id}/stream?v=${Date.now()}`,
       // Preserve aiGenerated flag for Remotion-generated animations (critical for edit workflow detection)
       aiGenerated: a.aiGenerated || false,
+      linked: a.linked || false,
     }));
 
     setAssets(serverAssets);

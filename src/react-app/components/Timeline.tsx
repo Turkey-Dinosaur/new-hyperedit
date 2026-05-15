@@ -104,6 +104,8 @@ export default function Timeline({
   const timelineRef = useRef<HTMLDivElement>(null);
   const tracksContainerRef = useRef<HTMLDivElement>(null);
   const trackHeadersRef = useRef<HTMLDivElement>(null);
+  // Stores initial clip positions for all selected clips when a multi-select drag/resize begins
+  const multiDragInitialStates = useRef<Map<string, { start: number; inPoint: number; outPoint: number }> | null>(null);
 
   // Sync vertical scroll between track headers and tracks content
   useEffect(() => {
@@ -527,7 +529,7 @@ export default function Timeline({
           </button>
           <span className="text-xs text-zinc-400 w-12 text-center">{Math.round(zoom * 100)}%</span>
           <button
-            onClick={() => setZoom(Math.min(4, zoom + 0.25))}
+            onClick={() => setZoom(zoom + 0.25)}
             className="p-1.5 bg-zinc-700 hover:bg-zinc-600 rounded text-xs transition-colors"
             title="Zoom in"
           >
@@ -722,6 +724,19 @@ export default function Timeline({
                           onClick={(modifiers) => onSelectClip(clip.id, modifiers)}
                           onDragStart={() => {
                             onBeginDrag?.();
+                            // Capture initial positions of all selected clips for multi-select drag/resize
+                            if (selectedClipIds.includes(clip.id) && selectedClipIds.length > 1) {
+                              const initialStates = new Map<string, { start: number; inPoint: number; outPoint: number }>();
+                              for (const selId of selectedClipIds) {
+                                const selClip = clips.find(c => c.id === selId);
+                                if (selClip) {
+                                  initialStates.set(selId, { start: selClip.start, inPoint: selClip.inPoint, outPoint: selClip.outPoint });
+                                }
+                              }
+                              multiDragInitialStates.current = initialStates;
+                            } else {
+                              multiDragInitialStates.current = null;
+                            }
                             setDraggedClipInfo({
                               id: clip.id,
                               originalTrackId: track.id,
@@ -802,17 +817,46 @@ export default function Timeline({
                           onDragEnd={() => {
                             setDraggedClipInfo(prev => {
                               if (prev) {
-                                onMoveClip(prev.id, prev.currentStart, prev.currentTrackId);
-                                onFinalizeMove(prev.id);
+                                const initialStates = multiDragInitialStates.current;
+                                if (initialStates && selectedClipIds.includes(prev.id) && selectedClipIds.length > 1) {
+                                  const delta = prev.currentStart - prev.originalStart;
+                                  for (const selId of selectedClipIds) {
+                                    const initial = initialStates.get(selId);
+                                    if (!initial) continue;
+                                    const newStart = Math.max(0, initial.start + delta);
+                                    onMoveClip(selId, newStart, selId === prev.id ? prev.currentTrackId : undefined);
+                                    onFinalizeMove(selId);
+                                  }
+                                } else {
+                                  onMoveClip(prev.id, prev.currentStart, prev.currentTrackId);
+                                  onFinalizeMove(prev.id);
+                                }
                                 onSave();
                               }
                               return null;
                             });
                             onCommitDrag?.();
                           }}
-                          onResize={(inPoint, outPoint, newStart) =>
-                            onResizeClip(clip.id, inPoint, outPoint, newStart)
-                          }
+                          onResize={(inPoint, outPoint, newStart) => {
+                            const initialStates = multiDragInitialStates.current;
+                            if (initialStates && selectedClipIds.includes(clip.id) && selectedClipIds.length > 1) {
+                              const primary = initialStates.get(clip.id);
+                              if (primary) {
+                                const deltaIn = inPoint - primary.inPoint;
+                                const deltaOut = outPoint - primary.outPoint;
+                                for (const selId of selectedClipIds) {
+                                  const initial = initialStates.get(selId);
+                                  if (!initial) continue;
+                                  const newSelIn = Math.max(0, initial.inPoint + deltaIn);
+                                  const newSelOut = initial.outPoint + deltaOut;
+                                  const newSelStart = newStart !== undefined ? Math.max(0, initial.start + deltaIn) : undefined;
+                                  onResizeClip(selId, newSelIn, newSelOut, newSelStart);
+                                }
+                              }
+                            } else {
+                              onResizeClip(clip.id, inPoint, outPoint, newStart);
+                            }
+                          }}
                           onDelete={() => onDeleteClip(clip.id)}
                           isCaption={isCaption}
                           captionPreview={captionPreview}

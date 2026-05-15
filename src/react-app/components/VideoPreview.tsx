@@ -24,6 +24,8 @@ interface ClipLayer {
   width?: number;
   height?: number;
   transform?: ClipTransform;
+  speed?: number;
+  volume?: number;
   // Caption-specific data
   captionWords?: CaptionWord[];
   captionStyle?: CaptionStyle;
@@ -35,6 +37,7 @@ interface VideoPreviewProps {
   aspectRatio?: '16:9' | '9:16' | 'auto';
   volume?: number;
   onLayerMove?: (layerId: string, x: number, y: number) => void;
+  onLayerDragStart?: (layerId: string) => void;
   onLayerSelect?: (layerId: string) => void;
   onCaptionEdit?: (layerId: string, newText: string) => void;
   onCaptionBoxResize?: (layerId: string, newWidth: number) => void;
@@ -91,6 +94,7 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(({
   aspectRatio = 'auto',
   volume = 0.5,
   onLayerMove,
+  onLayerDragStart,
   onLayerSelect,
   onCaptionEdit,
   onCaptionBoxResize,
@@ -158,13 +162,21 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(({
     }
   }, [baseLayerUrl]);
 
-  // Master Volume control for base video
+  // Master volume × per-clip volume for base video (clamped to 0–1 for browser)
   useEffect(() => {
     const video = videoRef.current;
     if (video) {
-      video.volume = volume;
+      video.volume = Math.min(1, volume * (foundBaseLayer?.volume ?? 1));
     }
-  }, [volume]);
+  }, [volume, foundBaseLayer?.volume]);
+
+  // Playback speed for base video (browser caps at 16x)
+  useEffect(() => {
+    const video = videoRef.current;
+    if (video) {
+      video.playbackRate = Math.min(16, Math.max(0.1, foundBaseLayer?.speed ?? 1));
+    }
+  }, [foundBaseLayer?.speed]);
 
   // Seek control for base video (only when paused/scrubbing)
   useEffect(() => {
@@ -212,17 +224,20 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(({
     }
   }, [isPlaying]);
 
-  // Play/pause and Volume control for overlay videos (V2, V3, etc.)
+  // Play/pause, per-clip volume, and per-clip speed for overlay videos (V2, V3, etc.)
   useEffect(() => {
-    overlayVideoRefs.current.forEach((video) => {
-      video.volume = volume;
+    const layerMap = new Map(layers.map(l => [l.id, l]));
+    overlayVideoRefs.current.forEach((video, id) => {
+      const layer = layerMap.get(id);
+      video.volume = Math.min(1, volume * (layer?.volume ?? 1));
+      video.playbackRate = Math.min(16, Math.max(0.1, layer?.speed ?? 1));
       if (isPlaying) {
         video.play().catch(() => { });
       } else {
         video.pause();
       }
     });
-  }, [isPlaying, volume]);
+  }, [isPlaying, volume, layers]);
 
   // Sync overlay video and audio seeking when scrubbing
   useEffect(() => {
@@ -272,9 +287,9 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(({
       layerY: layer.transform?.y || 0,
     });
 
-    // Select this layer
+    onLayerDragStart?.(layer.id);
     onLayerSelect?.(layer.id);
-  }, [onLayerSelect, editingCaptionId]);
+  }, [onLayerSelect, onLayerDragStart, editingCaptionId]);
 
   // Handle double-click on caption layer to enter edit mode
   const handleCaptionDoubleClick = useCallback((e: React.MouseEvent, layer: ClipLayer) => {
@@ -455,7 +470,7 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(({
           ref={videoRef}
           src={foundBaseLayer.url}
           className={`absolute inset-0 w-full h-full ${videoFitClass}`}
-          style={{ zIndex: 1 }}
+          style={getTransformStyles(foundBaseLayer.transform, 1)}
           playsInline
           preload="auto"
           onLoadedData={handleLoaded}
@@ -487,12 +502,12 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(({
               playsInline
               preload="auto"
               onLoadedData={(e) => {
-                // Seek to correct time when loaded
                 const video = e.currentTarget;
                 if (layer.clipTime !== undefined) {
                   video.currentTime = layer.clipTime;
                 }
-                // Auto-play if timeline is playing
+                video.volume = Math.min(1, volume * (layer.volume ?? 1));
+                video.playbackRate = Math.min(16, Math.max(0.1, layer.speed ?? 1));
                 if (isPlaying) {
                   video.play().catch(() => { });
                 }

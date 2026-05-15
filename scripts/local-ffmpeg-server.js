@@ -2050,7 +2050,8 @@ function handleAssetList(req, res, sessionId) {
     width: asset.width,
     height: asset.height,
     thumbnailUrl: asset.thumbPath ? `/session/${sessionId}/assets/${asset.id}/thumbnail` : null,
-    aiGenerated: asset.aiGenerated || false, // True for Remotion-generated animations
+    aiGenerated: asset.aiGenerated || false,
+    linked: asset.linked || false,
   }));
 
   res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
@@ -2303,7 +2304,25 @@ async function handleProjectRender(req, res, sessionId) {
     const isPreview = options.preview === true;
 
     const clips = session.project.clips;
-    const settings = session.project.settings;
+    const rawSettings = session.project.settings;
+
+    // Always derive canvas dimensions from the V1 clip's actual asset so portrait/square
+    // videos export at their real aspect ratio instead of the 1920×1080 session default.
+    let resolvedWidth = null;
+    let resolvedHeight = null;
+    const v1Clip = clips.find(c => c.trackId === 'V1' && c.assetId);
+    if (v1Clip) {
+      const v1Asset = session.assets.get(v1Clip.assetId);
+      if (v1Asset && v1Asset.width && v1Asset.height) {
+        resolvedWidth = v1Asset.width;
+        resolvedHeight = v1Asset.height;
+      }
+    }
+    const settings = {
+      ...rawSettings,
+      width: resolvedWidth || rawSettings.width || 1920,
+      height: resolvedHeight || rawSettings.height || 1080,
+    };
 
     if (clips.length === 0) {
       res.writeHead(400, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
@@ -2382,10 +2401,13 @@ async function handleProjectRender(req, res, sessionId) {
 
           const inPoint = clip.inPoint || 0;
           const outPoint = clip.outPoint || asset.duration;
-          const trimDuration = outPoint - inPoint;
+          const speed = clip.speed || 1;
 
           let clipFilter = `[${idx}:v]`;
           clipFilter += `trim=${inPoint}:${outPoint},setpts=PTS-STARTPTS,`;
+          if (speed !== 1) {
+            clipFilter += `setpts=PTS*${(1 / speed).toFixed(6)},`;
+          }
           clipFilter += `scale=${settings.width}:${settings.height}:force_original_aspect_ratio=decrease,`;
           clipFilter += `pad=${settings.width}:${settings.height}:(ow-iw)/2:(oh-ih)/2`;
 
@@ -2406,7 +2428,8 @@ async function handleProjectRender(req, res, sessionId) {
 
           const overlayX = clip.transform?.x || `(W-w)/2`;
           const overlayY = clip.transform?.y || `(H-h)/2`;
-          const enable = `between(t,${clip.start},${clip.start + trimDuration})`;
+          // Use clip.duration (speed-adjusted timeline duration) not raw trimDuration
+          const enable = `between(t,${clip.start},${clip.start + clip.duration})`;
 
           filterParts.push(`[${lastVideo}][v${idx}]overlay=x=${overlayX}:y=${overlayY}:enable='${enable}':eof_action=pass[out${idx}]`);
           lastVideo = `out${idx}`;
@@ -2475,12 +2498,16 @@ async function handleProjectRender(req, res, sessionId) {
 
           const inPoint = clip.inPoint || 0;
           const outPoint = clip.outPoint || asset.duration;
+          const speed = clip.speed || 1;
+          const vol = clip.volume || 1;
           const delayMs = Math.floor(clip.start * 1000);
           const label = `au${audioLabelIdx++}`;
 
-          filterParts.push(
-            `[${idx}:a]atrim=${inPoint}:${outPoint},asetpts=PTS-STARTPTS,adelay=${delayMs}|${delayMs}[${label}]`
-          );
+          let aFilter = `[${idx}:a]atrim=${inPoint}:${outPoint},asetpts=PTS-STARTPTS`;
+          if (speed !== 1) aFilter += `,${buildAtempoChain(speed)}`;
+          if (vol !== 1) aFilter += `,volume=${vol}`;
+          aFilter += `,adelay=${delayMs}|${delayMs}[${label}]`;
+          filterParts.push(aFilter);
           allAudioLabels.push(`[${label}]`);
         }
 
@@ -2493,12 +2520,14 @@ async function handleProjectRender(req, res, sessionId) {
           const idx = inputIndex++;
           const inPoint = clip.inPoint || 0;
           const outPoint = clip.outPoint || asset.duration;
+          const vol = clip.volume || 1;
           const delayMs = Math.floor(clip.start * 1000);
           const label = `au${audioLabelIdx++}`;
 
-          filterParts.push(
-            `[${idx}:a]atrim=${inPoint}:${outPoint},asetpts=PTS-STARTPTS,adelay=${delayMs}|${delayMs}[${label}]`
-          );
+          let aFilter = `[${idx}:a]atrim=${inPoint}:${outPoint},asetpts=PTS-STARTPTS`;
+          if (vol !== 1) aFilter += `,volume=${vol}`;
+          aFilter += `,adelay=${delayMs}|${delayMs}[${label}]`;
+          filterParts.push(aFilter);
           allAudioLabels.push(`[${label}]`);
         }
 
@@ -2531,11 +2560,15 @@ async function handleProjectRender(req, res, sessionId) {
 
         if (isPreview) {
           ffmpegArgs.push('-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '28');
+          ffmpegArgs.push('-pix_fmt', 'yuv420p');
         } else {
-          ffmpegArgs.push('-c:v', 'libx264', '-preset', 'medium', '-crf', '18');
+          ffmpegArgs.push('-c:v', 'libx264', '-preset', 'slow', '-crf', '23');
+          ffmpegArgs.push('-profile:v', 'high', '-level:v', '4.0');
+          ffmpegArgs.push('-pix_fmt', 'yuv420p');
+          ffmpegArgs.push('-maxrate', '3500k', '-bufsize', '7000k');
         }
 
-        ffmpegArgs.push('-c:a', 'aac', '-b:a', '192k');
+        ffmpegArgs.push('-c:a', 'aac', '-b:a', '128k');
         ffmpegArgs.push('-movflags', '+faststart');
         ffmpegArgs.push('-t', totalDuration.toString());
         ffmpegArgs.push(outputPath);
@@ -8142,6 +8175,21 @@ async function handleExtractAudio(req, res, sessionId) {
   }
 }
 
+// Build FFmpeg atempo chain for audio speed adjustment.
+// atempo is limited to [0.5, 2.0] per filter instance; chain multiple for larger ranges.
+function buildAtempoChain(speed) {
+  const filters = [];
+  let remaining = speed;
+  if (remaining >= 1) {
+    while (remaining > 2) { filters.push('atempo=2.0'); remaining /= 2; }
+    if (remaining > 1.01) filters.push(`atempo=${remaining.toFixed(4)}`);
+  } else {
+    while (remaining < 0.5) { filters.push('atempo=0.5'); remaining *= 2; }
+    if (remaining < 0.99) filters.push(`atempo=${remaining.toFixed(4)}`);
+  }
+  return filters.length > 0 ? filters.join(',') : 'atempo=1.0';
+}
+
 // Get video stream info
 async function getVideoInfo(filePath) {
   try {
@@ -8178,6 +8226,8 @@ async function checkFastConcatCompatibility(session, clips) {
     if (!asset) return false;
     // Fast path only if No Trimming (frame accuracy issues with -c copy on trimmed clips)
     if ((clip.inPoint && clip.inPoint > 0.1) || (clip.duration && Math.abs(clip.duration - asset.duration) > 0.1)) return false;
+    // Fast path cannot apply per-clip speed or volume adjustments
+    if ((clip.speed && Math.abs(clip.speed - 1) > 0.01) || (clip.volume && Math.abs(clip.volume - 1) > 0.01)) return false;
     const meta = await getVideoInfo(asset.path);
     if (!meta) return false;
     if (!firstMeta) firstMeta = meta;
@@ -8438,38 +8488,6 @@ async function handleUseTemplate(req, res, sessionId, options = {}) {
     try {
       console.log(`\n[${jobId}] === AUTO-EDIT (USE TEMPLATE${options.runVoiceover ? ' + VOICEOVER' : ''}) ===`);
       console.log(`[${jobId}] Asset: ${videoAsset.filename} (${videoDuration.toFixed(1)}s)`);
-
-      // ── Step A: Mute source (auto-edit-full only) ──
-      // Strip audio so the AI voiceover plays clean over the cut V1 clips.
-      if (options.runVoiceover) {
-        updateProgress(1, 'Silencing original audio...');
-        const mutedAssetId = randomUUID();
-        const mutedPath = join(session.assetsDir, `${mutedAssetId}.mp4`);
-        try {
-          await runFFmpeg(['-y', '-i', videoAsset.path, '-c:v', 'copy', '-an', mutedPath], jobId);
-          const stats = statSync(mutedPath);
-          const mutedAsset = {
-            id: mutedAssetId,
-            type: 'video',
-            filename: `muted-${videoAsset.filename}`,
-            path: mutedPath,
-            thumbPath: videoAsset.thumbPath || null,
-            duration: videoAsset.duration,
-            size: stats.size,
-            width: videoAsset.width || 1920,
-            height: videoAsset.height || 1080,
-            createdAt: Date.now(),
-            sourceAssetId: assetId,
-            aiGenerated: true,
-          };
-          session.assets.set(mutedAssetId, mutedAsset);
-          videoAsset = mutedAsset;
-          assetId = mutedAssetId;
-          console.log(`[${jobId}] Muted source created: ${mutedAssetId}`);
-        } catch (muteErr) {
-          console.error(`[${jobId}] Mute step failed (continuing with original audio):`, muteErr.message);
-        }
-      }
 
       // ── Step B: Scene Detection ──
       updateProgress(2, 'Detecting scene changes...');
@@ -9133,15 +9151,26 @@ async function handleMergeAll(req, res, sessionId) {
             if (!asset) continue;
             args.push('-i', asset.path);
             const inPoint = clip.inPoint || 0;
-            const duration = clip.duration || asset.duration;
+            const speed = clip.speed || 1;
+            const vol = clip.volume || 1;
+            const duration = clip.duration || (clip.outPoint != null ? (clip.outPoint - inPoint) / speed : asset.duration - inPoint);
+            const outPoint = clip.outPoint != null ? clip.outPoint : inPoint + (duration * speed);
             totalDuration += duration;
-            filterParts.push(`[${validClipsCount}:v]trim=start=${inPoint}:end=${inPoint + duration},setpts=PTS-STARTPTS,scale=${targetW}:${targetH}:force_original_aspect_ratio=increase,crop=${targetW}:${targetH},setsar=1[v${validClipsCount}]`);
+
+            let vFilter = `[${validClipsCount}:v]trim=start=${inPoint}:end=${outPoint},setpts=PTS-STARTPTS`;
+            if (speed !== 1) vFilter += `,setpts=PTS*${(1 / speed).toFixed(6)}`;
+            vFilter += `,scale=${targetW}:${targetH}:force_original_aspect_ratio=increase,crop=${targetW}:${targetH},setsar=1[v${validClipsCount}]`;
+            filterParts.push(vFilter);
             videoStreams.push(`[v${validClipsCount}]`);
 
             // Only add audio filter if the input actually has an audio stream
             const inputHasAudio = await hasAudioStream(asset.path);
             if (inputHasAudio) {
-              filterParts.push(`[${validClipsCount}:a]atrim=start=${inPoint}:end=${inPoint + duration},asetpts=PTS-STARTPTS[a${validClipsCount}]`);
+              let aFilter = `[${validClipsCount}:a]atrim=start=${inPoint}:end=${outPoint},asetpts=PTS-STARTPTS`;
+              if (speed !== 1) aFilter += `,${buildAtempoChain(speed)}`;
+              if (vol !== 1) aFilter += `,volume=${vol}`;
+              aFilter += `[a${validClipsCount}]`;
+              filterParts.push(aFilter);
               hasAnyAudio = true;
             } else {
               // Generate silent audio for inputs without audio

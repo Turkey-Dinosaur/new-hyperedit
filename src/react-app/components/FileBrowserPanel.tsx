@@ -1,5 +1,5 @@
 import { useState, useCallback, useEffect, useRef } from 'react';
-import { FolderOpen, FileVideo, FileImage, FileAudio, ChevronRight, ArrowUp, X, Loader2, Check, HardDrive } from 'lucide-react';
+import { FolderOpen, FileVideo, FileImage, FileAudio, ChevronRight, ArrowUp, X, Loader2, Check, HardDrive, Bookmark, BookmarkPlus, BookmarkX } from 'lucide-react';
 
 interface BrowseEntry {
   name: string;
@@ -23,7 +23,8 @@ interface FileBrowserPanelProps {
 const LOCAL_FFMPEG_URL = 'http://localhost:3333';
 
 const LAST_DIR_KEY = 'hyperedit-last-browse-dir';
-const DEFAULT_BROWSE_DIR = 'C:\\Users\\Ashley\\OneDrive\\Coedwig Creations\\Clips';
+const PINNED_DIRS_KEY = 'hyperedit-pinned-dirs';
+const DEFAULT_BROWSE_DIR = 'C:\\Users\\Ashleyc\\OneDrive\\Coedwig Creations\\Clips';
 
 function formatSize(bytes: number): string {
   if (bytes === 0) return '';
@@ -47,6 +48,27 @@ function getFileIcon(name: string) {
   return <FileVideo className="w-4 h-4 text-zinc-400" />;
 }
 
+function loadPinnedDirs(): string[] {
+  try {
+    const stored = localStorage.getItem(PINNED_DIRS_KEY);
+    if (!stored) return [DEFAULT_BROWSE_DIR];
+    const parsed = JSON.parse(stored);
+    return Array.isArray(parsed) ? parsed : [DEFAULT_BROWSE_DIR];
+  } catch {
+    return [DEFAULT_BROWSE_DIR];
+  }
+}
+
+function savePinnedDirs(dirs: string[]) {
+  localStorage.setItem(PINNED_DIRS_KEY, JSON.stringify(dirs));
+}
+
+function shortLabel(path: string): string {
+  const sep = path.includes('/') ? '/' : '\\';
+  const parts = path.split(sep).filter(Boolean);
+  return parts[parts.length - 1] || path;
+}
+
 export default function FileBrowserPanel({ sessionId, onClose, onImported }: FileBrowserPanelProps) {
   const [currentPath, setCurrentPath] = useState('');
   const [entries, setEntries] = useState<BrowseEntry[]>([]);
@@ -57,6 +79,7 @@ export default function FileBrowserPanel({ sessionId, onClose, onImported }: Fil
   const [selectedFiles, setSelectedFiles] = useState<Set<string>>(new Set());
   const [editingPath, setEditingPath] = useState(false);
   const [pathInput, setPathInput] = useState('');
+  const [pinnedDirs, setPinnedDirs] = useState<string[]>(loadPinnedDirs);
   const pathInputRef = useRef<HTMLInputElement>(null);
 
   const browse = useCallback(async (path?: string) => {
@@ -115,7 +138,7 @@ export default function FileBrowserPanel({ sessionId, onClose, onImported }: Fil
   const selectAllFiles = useCallback(() => {
     const allFiles = entries.filter(e => e.type === 'file').map(e => e.name);
     setSelectedFiles(prev => {
-      if (prev.size === allFiles.length) return new Set(); // Deselect all
+      if (prev.size === allFiles.length) return new Set();
       return new Set(allFiles);
     });
   }, [entries]);
@@ -149,6 +172,27 @@ export default function FileBrowserPanel({ sessionId, onClose, onImported }: Fil
     }
   }, [selectedFiles, currentPath, sessionId, onImported, onClose]);
 
+  const pinCurrentFolder = useCallback(() => {
+    if (!currentPath) return;
+    setPinnedDirs(prev => {
+      if (prev.includes(currentPath)) return prev;
+      const next = [...prev, currentPath];
+      savePinnedDirs(next);
+      return next;
+    });
+  }, [currentPath]);
+
+  const unpinFolder = useCallback((path: string, e: React.MouseEvent) => {
+    e.stopPropagation();
+    setPinnedDirs(prev => {
+      const next = prev.filter(p => p !== path);
+      savePinnedDirs(next);
+      return next;
+    });
+  }, []);
+
+  const isCurrentPinned = pinnedDirs.includes(currentPath);
+
   // Breadcrumb segments from path
   const pathSegments = currentPath.split(/[/\\]/).filter(Boolean);
   const fileCount = entries.filter(e => e.type === 'file').length;
@@ -161,6 +205,7 @@ export default function FileBrowserPanel({ sessionId, onClose, onImported }: Fil
           <div className="flex items-center gap-2">
             <FolderOpen className="w-5 h-5 text-teal-500" />
             <span className="text-lg font-semibold text-white">Browse Files</span>
+            <span className="text-xs text-zinc-500 bg-zinc-800 px-2 py-0.5 rounded-full">no copy — originals stay in place</span>
           </div>
           <button
             onClick={onClose}
@@ -169,6 +214,35 @@ export default function FileBrowserPanel({ sessionId, onClose, onImported }: Fil
             <X className="w-5 h-5 text-zinc-400" />
           </button>
         </div>
+
+        {/* Pinned folders */}
+        {pinnedDirs.length > 0 && (
+          <div className="px-4 py-2 border-b border-zinc-800 flex items-center gap-1.5 overflow-x-auto flex-wrap">
+            <Bookmark className="w-3.5 h-3.5 text-zinc-500 flex-shrink-0" />
+            {pinnedDirs.map(dir => (
+              <div
+                key={dir}
+                className={`group flex items-center gap-1 px-2 py-1 rounded-md text-xs cursor-pointer transition-colors flex-shrink-0 ${
+                  dir === currentPath
+                    ? 'bg-teal-600/20 text-teal-400 border border-teal-600/40'
+                    : 'bg-zinc-800 text-zinc-300 hover:bg-zinc-700 border border-transparent'
+                }`}
+                onClick={() => browse(dir)}
+                title={dir}
+              >
+                <FolderOpen className="w-3 h-3 opacity-70" />
+                <span className="max-w-[120px] truncate">{shortLabel(dir)}</span>
+                <button
+                  onClick={(e) => unpinFolder(dir, e)}
+                  className="opacity-0 group-hover:opacity-100 ml-0.5 text-zinc-500 hover:text-red-400 transition-opacity"
+                  title="Remove pin"
+                >
+                  <BookmarkX className="w-3 h-3" />
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
 
         {/* Breadcrumb / path input navigation */}
         <div className="px-4 py-2 border-b border-zinc-800 flex items-center gap-1 overflow-x-auto">
@@ -200,7 +274,7 @@ export default function FileBrowserPanel({ sessionId, onClose, onImported }: Fil
                 onChange={(e) => setPathInput(e.target.value)}
                 onBlur={() => setEditingPath(false)}
                 onKeyDown={(e) => { if (e.key === 'Escape') setEditingPath(false); }}
-                placeholder="Type a folder path, e.g. C:\Users\Ashley\OneDrive\Videos"
+                placeholder="Type a folder path, e.g. C:\Users\Ashleyc\OneDrive\Videos"
                 className="flex-1 px-2 py-1 bg-zinc-800 border border-teal-600 rounded text-xs text-white placeholder-zinc-500 focus:outline-none"
                 autoFocus
               />
@@ -244,6 +318,21 @@ export default function FileBrowserPanel({ sessionId, onClose, onImported }: Fil
                 );
               })}
             </div>
+          )}
+
+          {/* Pin/unpin current folder button */}
+          {currentPath && !editingPath && (
+            <button
+              onClick={isCurrentPinned ? (e) => unpinFolder(currentPath, e as React.MouseEvent) : pinCurrentFolder}
+              className={`p-1.5 rounded transition-colors flex-shrink-0 ${
+                isCurrentPinned
+                  ? 'text-teal-400 hover:text-red-400 hover:bg-zinc-800'
+                  : 'text-zinc-600 hover:text-teal-400 hover:bg-zinc-800'
+              }`}
+              title={isCurrentPinned ? 'Remove pin' : 'Pin this folder for quick access'}
+            >
+              {isCurrentPinned ? <Bookmark className="w-3.5 h-3.5 fill-current" /> : <BookmarkPlus className="w-3.5 h-3.5" />}
+            </button>
           )}
         </div>
 

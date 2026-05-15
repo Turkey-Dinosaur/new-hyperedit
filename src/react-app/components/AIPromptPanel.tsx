@@ -182,6 +182,10 @@ interface AIPromptPanelProps {
   onAutoOrder?: () => Promise<void>;
   onMergeAll?: (onProgress?: (status: string) => void) => Promise<{ assetId: string; duration: number }>;
   onUseTemplate?: (onProgress?: (status: string) => void) => Promise<{ totalDuration: number; editDecisions: { reason: string }[]; contentAnalysis: { content_type: string }; editingNotes: string }>;
+  onRunAnalysisOnly?: (onProgress?: (status: string) => void) => Promise<{ script: string; editDecisions: Array<{ assetId: string; clipInPoint: number; clipOutPoint: number; clipDuration: number }>; contentAnalysis: { content_type: string }; editingNotes: string; totalDuration: number }>;
+  onAutoEditVideo?: (onProgress?: (status: string) => void) => Promise<{ totalDuration: number }>;
+  onGenerateScript?: (onProgress?: (status: string) => void) => Promise<{ skipped: boolean; script: string }>;
+  onNoAudioEdit?: (onProgress?: (status: string) => void) => Promise<{ totalDuration: number }>;
   onOpenAnimationInTab?: (assetId: string, animationName: string) => string | undefined;
   onEditAnimation?: (assetId: string, editPrompt: string, v1Context?: EditTabV1Context, tabIdToUpdate?: string) => Promise<{ assetId: string; duration: number; sceneCount: number }>;
   isApplying?: boolean;
@@ -219,6 +223,10 @@ export default function AIPromptPanel({
   onAutoOrder,
   onMergeAll,
   onUseTemplate,
+  onRunAnalysisOnly,
+  onAutoEditVideo,
+  onGenerateScript,
+  onNoAudioEdit,
   onOpenAnimationInTab,
   onEditAnimation,
   isApplying,
@@ -240,6 +248,7 @@ export default function AIPromptPanel({
   const [chatHistory, setChatHistory] = useState<ChatMessage[]>([]);
   const [showCaptionOptions, setShowCaptionOptions] = useState(false);
   const [showQuickActions, setShowQuickActions] = useState(false);
+  const [showPipelineSteps, setShowPipelineSteps] = useState(false);
   const [showReferencePicker, setShowReferencePicker] = useState(false);
   const [selectedReferences, setSelectedReferences] = useState<TimelineReference[]>([]);
   const [showTimeRangePicker, setShowTimeRangePicker] = useState(false);
@@ -251,6 +260,7 @@ export default function AIPromptPanel({
   const [isDragOverChat, setIsDragOverChat] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const quickActionsRef = useRef<HTMLDivElement>(null);
+  const pipelineStepsRef = useRef<HTMLDivElement>(null);
   const referencePickerRef = useRef<HTMLDivElement>(null);
   const timeRangePickerRef = useRef<HTMLDivElement>(null);
   const chatEndRef = useRef<HTMLDivElement>(null);
@@ -300,6 +310,20 @@ export default function AIPromptPanel({
       return () => document.removeEventListener('mousedown', handleClickOutside);
     }
   }, [showQuickActions]);
+
+  // Close pipeline steps when clicking outside
+  useEffect(() => {
+    const handleClickOutside = (event: MouseEvent) => {
+      if (pipelineStepsRef.current && !pipelineStepsRef.current.contains(event.target as Node)) {
+        setShowPipelineSteps(false);
+      }
+    };
+
+    if (showPipelineSteps) {
+      document.addEventListener('mousedown', handleClickOutside);
+      return () => document.removeEventListener('mousedown', handleClickOutside);
+    }
+  }, [showPipelineSteps]);
 
   // Close reference picker when clicking outside
   useEffect(() => {
@@ -2043,6 +2067,170 @@ export default function AIPromptPanel({
     }
   };
 
+  const handleRunAnalysisOnlyWorkflow = async () => {
+    if (!onRunAnalysisOnly) return;
+
+    setIsProcessing(true);
+    setProcessingStatus('Running AI analysis...');
+
+    setChatHistory(prev => [...prev, {
+      type: 'assistant',
+      text: '🔍 Running AI analysis — detecting scenes, analyzing content, and generating edit decisions + viral script...',
+      isProcessingGifs: true,
+    }]);
+
+    try {
+      const result = await onRunAnalysisOnly(setProcessingStatus);
+      const scriptPreview = result.script
+        ? `\n\n**Generated Script:**\n${result.script.substring(0, 400)}${result.script.length > 400 ? '...' : ''}`
+        : '';
+      setChatHistory(prev => {
+        const updated = [...prev];
+        const lastIdx = updated.length - 1;
+        if (updated[lastIdx]?.isProcessingGifs) {
+          updated[lastIdx] = {
+            ...updated[lastIdx],
+            text: `✅ AI analysis complete!\n\n**Content type:** ${result.contentAnalysis?.content_type || 'unknown'}\n**Edit decisions:** ${result.editDecisions?.length || 0} clips\n**Total duration:** ${Math.round(result.totalDuration)}s${result.editingNotes ? '\n\n**Notes:** ' + result.editingNotes : ''}${scriptPreview}`,
+            isProcessingGifs: false,
+            applied: true,
+          };
+        }
+        return updated;
+      });
+    } catch (error) {
+      console.error('AI analysis failed:', error);
+      setChatHistory(prev => [...prev, {
+        type: 'assistant',
+        text: `❌ AI analysis failed: ${error instanceof Error ? error.message : 'Unknown error'}`,
+      }]);
+    } finally {
+      setIsProcessing(false);
+      setProcessingStatus('');
+    }
+  };
+
+  const handleAutoEditVideoWorkflow = async () => {
+    if (!onAutoEditVideo) return;
+
+    setIsProcessing(true);
+    setProcessingStatus('Starting AI video edit...');
+
+    setChatHistory(prev => [...prev, {
+      type: 'assistant',
+      text: '✂️ Running Gemini edit on your V1 clip — analysing content and cutting to a short-form video. Original audio will be preserved.',
+      isProcessingGifs: true,
+    }]);
+
+    try {
+      const result = await onAutoEditVideo(setProcessingStatus);
+      setChatHistory(prev => {
+        const updated = [...prev];
+        const lastIdx = updated.length - 1;
+        if (updated[lastIdx]?.isProcessingGifs) {
+          updated[lastIdx] = {
+            ...updated[lastIdx],
+            text: `✅ Done! Created a ${Math.round(result.totalDuration)}s short-form cut on V1 with original audio intact.`,
+            isProcessingGifs: false,
+            applied: true,
+          };
+        }
+        return updated;
+      });
+    } catch (error) {
+      console.error('Auto edit video failed:', error);
+      setChatHistory(prev => [...prev, {
+        type: 'assistant',
+        text: `❌ Auto edit failed: ${error instanceof Error ? error.message : 'Unknown error'}`,
+      }]);
+    } finally {
+      setIsProcessing(false);
+      setProcessingStatus('');
+    }
+  };
+
+  const handleGenerateScriptWorkflow = async () => {
+    if (!onGenerateScript) return;
+
+    setIsProcessing(true);
+    setProcessingStatus('Generating script...');
+
+    setChatHistory(prev => [...prev, {
+      type: 'assistant',
+      text: '📝 Generating a viral script for your video. This analyses the content and writes a voiceover script — you\'ll be prompted to upload the audio when it\'s ready...',
+      isProcessingGifs: true,
+    }]);
+
+    try {
+      const result = await onGenerateScript(setProcessingStatus);
+      const scriptPreview = result.script
+        ? `\n\n**Script:**\n${result.script.substring(0, 400)}${result.script.length > 400 ? '...' : ''}`
+        : '';
+      setChatHistory(prev => {
+        const updated = [...prev];
+        const lastIdx = updated.length - 1;
+        if (updated[lastIdx]?.isProcessingGifs) {
+          updated[lastIdx] = {
+            ...updated[lastIdx],
+            text: result.skipped
+              ? `Script generated and ready to use.${scriptPreview}`
+              : `✅ Script generated and voiceover added! Captions have been synced to the audio.${scriptPreview}`,
+            isProcessingGifs: false,
+            applied: true,
+          };
+        }
+        return updated;
+      });
+    } catch (error) {
+      console.error('Generate script failed:', error);
+      setChatHistory(prev => [...prev, {
+        type: 'assistant',
+        text: `❌ Script generation failed: ${error instanceof Error ? error.message : 'Unknown error'}`,
+      }]);
+    } finally {
+      setIsProcessing(false);
+      setProcessingStatus('');
+    }
+  };
+
+  const handleNoAudioEditWorkflow = async () => {
+    if (!onNoAudioEdit) return;
+
+    setIsProcessing(true);
+    setProcessingStatus('Starting no-audio edit...');
+
+    setChatHistory(prev => [...prev, {
+      type: 'assistant',
+      text: '✂️ Running AI edit — ordering clips, merging, analysing content, and applying edit decisions. No audio or captions will be added.',
+      isProcessingGifs: true,
+    }]);
+
+    try {
+      const result = await onNoAudioEdit(setProcessingStatus);
+      setChatHistory(prev => {
+        const updated = [...prev];
+        const lastIdx = updated.length - 1;
+        if (updated[lastIdx]?.isProcessingGifs) {
+          updated[lastIdx] = {
+            ...updated[lastIdx],
+            text: `✅ Video edit complete! Created a ${Math.round(result.totalDuration)}s cut on V1. Run "Generate script" to add a voiceover and captions.`,
+            isProcessingGifs: false,
+            applied: true,
+          };
+        }
+        return updated;
+      });
+    } catch (error) {
+      console.error('No-audio edit failed:', error);
+      setChatHistory(prev => [...prev, {
+        type: 'assistant',
+        text: `❌ Edit failed: ${error instanceof Error ? error.message : 'Unknown error'}`,
+      }]);
+    } finally {
+      setIsProcessing(false);
+      setProcessingStatus('');
+    }
+  };
+
   const handleExtractAudioWorkflow = async () => {
     if (!onExtractAudio) return;
 
@@ -2764,6 +2952,98 @@ export default function AIPromptPanel({
           <Wand2 className="w-4 h-4" />
           Motion Graphics
         </button>
+
+        {/* Auto-edit action buttons */}
+        <div className="grid grid-cols-2 gap-1.5 mb-2">
+          <button
+            type="button"
+            onClick={() => void handleAutoEditVideoWorkflow()}
+            disabled={!hasVideo || isProcessing || !onAutoEditVideo}
+            className="flex items-center justify-center gap-2 px-3 py-2.5 rounded-lg text-sm font-medium transition-all bg-gradient-to-r from-violet-500/20 to-purple-500/20 hover:from-violet-500/30 hover:to-purple-500/30 text-violet-300 hover:text-violet-200 border border-violet-500/30 hover:border-violet-500/50 disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            <Sparkles className="w-4 h-4 flex-shrink-0" />
+            <span className="truncate">Auto edit video</span>
+          </button>
+          <button
+            type="button"
+            onClick={() => void handleGenerateScriptWorkflow()}
+            disabled={!hasVideo || isProcessing || !onGenerateScript}
+            className="flex items-center justify-center gap-2 px-3 py-2.5 rounded-lg text-sm font-medium transition-all bg-gradient-to-r from-amber-500/20 to-orange-500/20 hover:from-amber-500/30 hover:to-orange-500/30 text-amber-300 hover:text-amber-200 border border-amber-500/30 hover:border-amber-500/50 disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            <Type className="w-4 h-4 flex-shrink-0" />
+            <span className="truncate">Generate script</span>
+          </button>
+          <button
+            type="button"
+            onClick={() => void handleNoAudioEditWorkflow()}
+            disabled={!hasVideo || isProcessing || !onNoAudioEdit}
+            className="col-span-2 flex items-center justify-center gap-2 px-3 py-2.5 rounded-lg text-sm font-medium transition-all bg-zinc-800 hover:bg-zinc-700 text-zinc-300 hover:text-zinc-100 border border-zinc-700 hover:border-zinc-600 disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            <Scissors className="w-4 h-4 flex-shrink-0" />
+            No audio edit
+          </button>
+        </div>
+
+        {/* Pipeline Steps — test each step individually */}
+        <div className="relative mb-2" ref={pipelineStepsRef}>
+          <button
+            type="button"
+            onClick={() => setShowPipelineSteps(!showPipelineSteps)}
+            disabled={!hasVideo || isProcessing}
+            className={`w-full flex items-center justify-center gap-2 px-4 py-2 rounded-lg text-xs font-medium transition-all ${showPipelineSteps
+              ? 'bg-zinc-700 text-zinc-300 ring-1 ring-zinc-600'
+              : 'bg-zinc-800/60 hover:bg-zinc-800 text-zinc-500 hover:text-zinc-400 disabled:opacity-50 disabled:cursor-not-allowed'
+              }`}
+          >
+            <Film className="w-3.5 h-3.5" />
+            Pipeline steps
+            {showPipelineSteps && <X className="w-3 h-3 ml-auto" />}
+          </button>
+
+          {showPipelineSteps && (
+            <div className="absolute bottom-full left-0 right-0 mb-2 p-2 bg-zinc-800 border border-zinc-700 rounded-xl shadow-xl z-10 animate-in fade-in slide-in-from-bottom-2 duration-200">
+              <p className="text-xs text-zinc-500 mb-2 px-1">Run each step individually for debugging</p>
+              <div className="flex flex-col gap-1.5">
+                <button
+                  type="button"
+                  onClick={() => { void handleAutoOrderWorkflow(); setShowPipelineSteps(false); }}
+                  disabled={isProcessing}
+                  className="flex items-center gap-3 px-3 py-2.5 bg-zinc-700/50 hover:bg-zinc-700 rounded-lg text-xs text-left transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  <span className="w-5 h-5 flex items-center justify-center rounded-full bg-zinc-600 text-zinc-300 text-[10px] font-bold flex-shrink-0">1</span>
+                  <div>
+                    <div className="text-zinc-200 font-medium leading-tight">Auto-order clips</div>
+                    <div className="text-zinc-500 leading-tight mt-0.5">Sort by filename timestamps</div>
+                  </div>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => { void handleMergeAllWorkflow(); setShowPipelineSteps(false); }}
+                  disabled={isProcessing}
+                  className="flex items-center gap-3 px-3 py-2.5 bg-zinc-700/50 hover:bg-zinc-700 rounded-lg text-xs text-left transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  <span className="w-5 h-5 flex items-center justify-center rounded-full bg-zinc-600 text-zinc-300 text-[10px] font-bold flex-shrink-0">2</span>
+                  <div>
+                    <div className="text-zinc-200 font-medium leading-tight">Merge all clips</div>
+                    <div className="text-zinc-500 leading-tight mt-0.5">Combine into single asset</div>
+                  </div>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => { void handleRunAnalysisOnlyWorkflow(); setShowPipelineSteps(false); }}
+                  disabled={isProcessing || !onRunAnalysisOnly}
+                  className="flex items-center gap-3 px-3 py-2.5 bg-zinc-700/50 hover:bg-zinc-700 rounded-lg text-xs text-left transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  <span className="w-5 h-5 flex items-center justify-center rounded-full bg-zinc-600 text-zinc-300 text-[10px] font-bold flex-shrink-0">3</span>
+                  <div>
+                    <div className="text-zinc-200 font-medium leading-tight">AI analysis</div>
+                    <div className="text-zinc-500 leading-tight mt-0.5">Scene detect + Gemini + script</div>
+                  </div>
+                </button>
+              </div>
+            </div>
+          )}
+        </div>
 
         {/* Quick Actions Popover */}
         <div className="relative mb-3" ref={quickActionsRef}>

@@ -1,5 +1,5 @@
 import { useRef, useCallback } from 'react';
-import { Film, Image, Music, Upload, Trash2, Plus, Sparkles, ImageIcon, FolderOpen } from 'lucide-react';
+import { Film, Image, Music, Upload, Trash2, Plus, Sparkles, ImageIcon, FolderOpen, Link } from 'lucide-react';
 import type { Asset } from '@/react-app/hooks/useProject';
 
 interface AssetLibraryProps {
@@ -99,10 +99,11 @@ export default function AssetLibrary({
           {onOpenFileBrowser && (
             <button
               onClick={onOpenFileBrowser}
-              className="p-1.5 bg-zinc-700 hover:bg-zinc-600 rounded text-xs transition-colors"
-              title="Browse local files"
+              className="flex items-center gap-1 px-2 py-1 bg-teal-700/60 hover:bg-teal-600/80 rounded text-xs transition-colors text-teal-200"
+              title="Import without copying — originals stay in their folder"
             >
               <FolderOpen className="w-3.5 h-3.5" />
+              <span className="hidden sm:inline">Import (no copy)</span>
             </button>
           )}
           {onOpenGifSearch && (
@@ -158,7 +159,10 @@ export default function AssetLibrary({
           >
             <Upload className="w-8 h-8 text-zinc-500 mb-2" />
             <span className="text-xs text-zinc-500 text-center">
-              Drop files here or click to upload
+              Drop files here to upload a copy
+            </span>
+            <span className="text-[10px] text-zinc-600 text-center mt-1">
+              For large video files use <strong className="text-teal-500">Import (no copy)</strong>
             </span>
           </div>
         ) : (
@@ -273,10 +277,21 @@ function AssetCard({ asset, isSelected, onSelect, onDelete, onDragStart }: Asset
       {/* Duration/info */}
       <div className="absolute bottom-0 left-0 right-0 bg-gradient-to-t from-black/80 to-transparent px-2 py-1">
         <div className="text-[10px] text-white truncate">{asset.filename}</div>
-        <div className="text-[9px] text-zinc-400">
-          {asset.type !== 'image' && formatDuration(asset.duration)}
-          {asset.type !== 'image' && ' • '}
-          {formatSize(asset.size)}
+        <div className="text-[9px] text-zinc-400 flex items-center gap-1">
+          <span>
+            {asset.type !== 'image' && formatDuration(asset.duration)}
+            {asset.type !== 'image' && ' • '}
+            {formatSize(asset.size)}
+          </span>
+          {asset.linked && (
+            <span
+              className="flex items-center gap-0.5 text-teal-400"
+              title="File is referenced from its original location — not copied"
+            >
+              <Link className="w-2.5 h-2.5" />
+              linked
+            </span>
+          )}
         </div>
       </div>
 
