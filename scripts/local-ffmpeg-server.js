@@ -98,9 +98,12 @@ function restoreSessionsFromDisk() {
     const assetsDir = join(sessionDir, 'assets');
     const rendersDir = join(sessionDir, 'renders');
 
-    // Create assets directory if it doesn't exist (for sessions created without uploads)
+    // Create assets/renders directories if they don't exist
     if (!existsSync(assetsDir)) {
       mkdirSync(assetsDir, { recursive: true });
+    }
+    if (!existsSync(rendersDir)) {
+      mkdirSync(rendersDir, { recursive: true });
     }
 
     // Restore project state from disk if it exists
@@ -410,7 +413,8 @@ function runFFmpeg(args, jobId, onProgress) {
       if (code === 0) {
         resolve(stderr);
       } else {
-        reject(new Error(`FFmpeg failed with code ${code}: ${stderr.slice(-500)}`));
+        if (jobId) console.error(`[${jobId}] FFmpeg failed (code ${code}). Full stderr:\n${stderr}`);
+        reject(new Error(`FFmpeg failed with code ${code}: ${stderr.slice(-2000)}`));
       }
     });
     ffmpeg.on('error', reject);
@@ -2563,14 +2567,16 @@ async function handleProjectRender(req, res, sessionId) {
           ffmpegArgs.push('-pix_fmt', 'yuv420p');
         } else {
           ffmpegArgs.push('-c:v', 'libx264', '-preset', 'slow', '-crf', '23');
-          ffmpegArgs.push('-profile:v', 'high', '-level:v', '4.0');
           ffmpegArgs.push('-pix_fmt', 'yuv420p');
-          ffmpegArgs.push('-maxrate', '3500k', '-bufsize', '7000k');
         }
 
         ffmpegArgs.push('-c:a', 'aac', '-b:a', '128k');
-        ffmpegArgs.push('-movflags', '+faststart');
+        // +faststart is omitted: it requires FFmpeg to write a temp file then rearrange
+        // the output, which reliably fails on Windows with EINVAL after encoding completes.
+        // The output is for local download only, so faststart is not needed.
         ffmpegArgs.push('-t', totalDuration.toString());
+        // Ensure output directory exists in case it was cleaned up after session restore
+        mkdirSync(session.rendersDir, { recursive: true });
         ffmpegArgs.push(outputPath);
 
         console.log(`[${jobId}] FFmpeg render command prepared`);
@@ -2578,6 +2584,7 @@ async function handleProjectRender(req, res, sessionId) {
         console.log(`[${jobId}] Total duration: ${totalDuration.toFixed(2)}s`);
         console.log(`[${jobId}] Output: ${outputPath}`);
         console.log(`[${jobId}] Filter complexity: ${filterParts.length} filters, ${inputs.length / 2} inputs`);
+        console.log(`[${jobId}] Full command: ffmpeg ${ffmpegArgs.join(' ')}`);
 
         job.statusMessage = 'Encoding video...';
         job.progress = 8;
