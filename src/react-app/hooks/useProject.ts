@@ -928,14 +928,19 @@ export function useProject() {
       outPoint: duration,
     };
 
-    // Store caption data separately
-    const captionInfo: CaptionData = {
-      words,
-      style: { ...defaultCaptionStyle, ...style },
-    };
-
     setClips(prev => [...prev, clip]);
-    setCaptionData(prev => ({ ...prev, [clipId]: captionInfo }));
+    
+    setCaptionData(prev => {
+      const existingIds = Object.keys(prev);
+      const baseStyle = existingIds.length > 0 ? prev[existingIds[0]].style : defaultCaptionStyle;
+      return {
+        ...prev,
+        [clipId]: {
+          words,
+          style: { ...baseStyle, ...style },
+        },
+      };
+    });
 
     return clip;
   }, [clips, recordHistory]);
@@ -953,6 +958,9 @@ export function useProject() {
     const newClips: TimelineClip[] = [];
     const newCaptionData: Record<string, CaptionData> = {};
 
+    const existingIds = Object.keys(captionData);
+    const baseStyle = existingIds.length > 0 ? captionData[existingIds[0]].style : defaultCaptionStyle;
+
     for (const caption of captions) {
       const clipId = crypto.randomUUID();
 
@@ -968,7 +976,7 @@ export function useProject() {
 
       newCaptionData[clipId] = {
         words: caption.words,
-        style: { ...defaultCaptionStyle, ...caption.style },
+        style: { ...baseStyle, ...caption.style },
       };
     }
 
@@ -977,20 +985,19 @@ export function useProject() {
     setCaptionData(prev => ({ ...prev, ...newCaptionData }));
 
     return newClips;
-  }, [clips, recordHistory]);
+  }, [clips, captionData, recordHistory]);
 
   // Update caption style
   const updateCaptionStyle = useCallback((clipId: string, styleUpdates: Partial<CaptionStyle>): void => {
     setCaptionData(prev => {
-      const existing = prev[clipId];
-      if (!existing) return prev;
-      return {
-        ...prev,
-        [clipId]: {
-          ...existing,
-          style: { ...existing.style, ...styleUpdates },
-        },
-      };
+      const next = { ...prev };
+      for (const id of Object.keys(next)) {
+        next[id] = {
+          ...next[id],
+          style: { ...next[id].style, ...styleUpdates },
+        };
+      }
+      return next;
     });
   }, []);
 
@@ -1011,18 +1018,18 @@ export function useProject() {
     return captionData[clipId] || null;
   }, [captionData]);
 
-  // Save project to server (debounced)
+  // Save project to server (debounced by default, immediate if specified)
   // Uses refs to always get latest state, avoiding stale closure issues
-  const saveProject = useCallback(async (): Promise<void> => {
+  const saveProject = useCallback(async (immediate = false): Promise<void> => {
     if (!session) return;
 
     // Clear any pending save
     if (saveTimeoutRef.current) {
       clearTimeout(saveTimeoutRef.current);
+      saveTimeoutRef.current = null;
     }
 
-    // Debounce saves - use refs to get latest state values
-    saveTimeoutRef.current = setTimeout(async () => {
+    const doSave = async () => {
       try {
         await fetch(`${LOCAL_FFMPEG_URL}/session/${session.sessionId}/project`, {
           method: 'PUT',
@@ -1038,7 +1045,14 @@ export function useProject() {
       } catch (error) {
         console.error('[Project] Save failed:', error);
       }
-    }, 500);
+    };
+
+    if (immediate) {
+      await doSave();
+    } else {
+      // Debounce saves - use refs to get latest state values
+      saveTimeoutRef.current = setTimeout(doSave, 500);
+    }
   }, [session]);
 
   // Load project from server (including assets)
@@ -1103,16 +1117,8 @@ export function useProject() {
     setStatus(preview ? 'Rendering preview...' : 'Rendering export...');
 
     try {
-      // Save project first - use refs to get latest state
-      await fetch(`${LOCAL_FFMPEG_URL}/session/${session.sessionId}/project`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          tracks: tracksRef.current,
-          clips: clipsRef.current,
-          settings: settingsRef.current,
-        }),
-      });
+      // Save project first - use refs to get latest state immediately and wait for it to complete
+      await saveProject(true);
 
       const response = await fetch(`${LOCAL_FFMPEG_URL}/session/${session.sessionId}/render`, {
         method: 'POST',

@@ -5,10 +5,11 @@ interface CaptionRendererProps {
   words: CaptionWord[];
   style: CaptionStyle;
   currentTime: number;  // Time within the caption clip
+  scaleFactor?: number; // Scaling factor for font size, padding, stroke, etc.
   inline?: boolean;     // When true, skip absolute positioning (parent handles it)
 }
 
-export default function CaptionRenderer({ words, style, currentTime, inline }: CaptionRendererProps) {
+export default function CaptionRenderer({ words, style, currentTime, scaleFactor = 1, inline }: CaptionRendererProps) {
   // Apply time offset (negative = captions appear earlier, positive = later)
   const adjustedTime = currentTime - (style.timeOffset || 0);
 
@@ -67,25 +68,27 @@ export default function CaptionRenderer({ words, style, currentTime, inline }: C
 
   // Get text styles
   const textStyles = useMemo((): React.CSSProperties => {
+    const fontSize = style.fontSize * scaleFactor;
+    const strokeWidth = (style.strokeWidth || 0) * scaleFactor;
     return {
       fontFamily: style.fontFamily,
-      fontSize: `${style.fontSize}px`,
+      fontSize: `${fontSize}px`,
       fontWeight: style.fontWeight === 'black' ? 900 : style.fontWeight === 'bold' ? 700 : 400,
       color: style.color,
-      textShadow: style.strokeWidth
+      textShadow: strokeWidth
         ? `
-          -${style.strokeWidth}px -${style.strokeWidth}px 0 ${style.strokeColor},
-          ${style.strokeWidth}px -${style.strokeWidth}px 0 ${style.strokeColor},
-          -${style.strokeWidth}px ${style.strokeWidth}px 0 ${style.strokeColor},
-          ${style.strokeWidth}px ${style.strokeWidth}px 0 ${style.strokeColor}
+          -${strokeWidth}px -${strokeWidth}px 0 ${style.strokeColor},
+          ${strokeWidth}px -${strokeWidth}px 0 ${style.strokeColor},
+          -${strokeWidth}px ${strokeWidth}px 0 ${style.strokeColor},
+          ${strokeWidth}px ${strokeWidth}px 0 ${style.strokeColor}
         `
         : undefined,
       backgroundColor: style.backgroundColor,
-      padding: style.backgroundColor ? '4px 12px' : undefined,
-      borderRadius: style.backgroundColor ? '4px' : undefined,
+      padding: style.backgroundColor ? `${4 * scaleFactor}px ${12 * scaleFactor}px` : undefined,
+      borderRadius: style.backgroundColor ? `${4 * scaleFactor}px` : undefined,
       lineHeight: 1.4,
     };
-  }, [style]);
+  }, [style, scaleFactor]);
 
   // Get animation class/style for a word
   const getWordStyle = (wordIndex: number, word: CaptionWord): React.CSSProperties => {
@@ -114,7 +117,7 @@ export default function CaptionRenderer({ words, style, currentTime, inline }: C
 
       case 'bounce':
         return {
-          transform: isActive ? 'translateY(-4px)' : 'translateY(0)',
+          transform: isActive ? `translateY(-${4 * scaleFactor}px)` : 'translateY(0)',
           display: 'inline-block',
           transition: 'transform 0.15s ease',
         };

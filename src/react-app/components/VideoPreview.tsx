@@ -36,6 +36,8 @@ interface VideoPreviewProps {
   isPlaying?: boolean;
   aspectRatio?: '16:9' | '9:16' | 'auto';
   volume?: number;
+  canvasWidth?: number;
+  canvasHeight?: number;
   onLayerMove?: (layerId: string, x: number, y: number) => void;
   onLayerDragStart?: (layerId: string) => void;
   onLayerSelect?: (layerId: string) => void;
@@ -50,14 +52,19 @@ export interface VideoPreviewHandle {
 }
 
 // Helper to build CSS styles from transform
-function getTransformStyles(transform?: ClipTransform, zIndex: number = 0, isDragging?: boolean): React.CSSProperties {
+function getTransformStyles(
+  transform?: ClipTransform,
+  zIndex: number = 0,
+  isDragging?: boolean,
+  scaleFactor: number = 1
+): React.CSSProperties {
   const t = transform || {};
 
   const transforms: string[] = [];
 
-  // Position (translate)
+  // Position (translate) - scale translation coordinates to match preview size
   if (t.x || t.y) {
-    transforms.push(`translate(${t.x || 0}px, ${t.y || 0}px)`);
+    transforms.push(`translate(${(t.x || 0) * scaleFactor}px, ${(t.y || 0) * scaleFactor}px)`);
   }
 
   // Scale
@@ -93,6 +100,8 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(({
   isPlaying = false,
   aspectRatio = 'auto',
   volume = 0.5,
+  canvasWidth = 1920,
+  canvasHeight: _canvasHeight = 1080,
   onLayerMove,
   onLayerDragStart,
   onLayerSelect,
@@ -113,6 +122,33 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(({
   const editInputRef = useRef<HTMLTextAreaElement>(null);
   const prevBaseLayerIdRef = useRef<string | undefined>(undefined);
   const [alignGuides, setAlignGuides] = useState<{ h: boolean; v: boolean }>({ h: false, v: false });
+
+  // Track the actual rendered size of the preview box
+  const [containerSize, setContainerSize] = useState({ width: 640, height: 360 });
+
+  useEffect(() => {
+    const container = containerRef.current;
+    if (!container) return;
+
+    const observer = new ResizeObserver((entries) => {
+      if (!entries || entries.length === 0) return;
+      const { width, height } = entries[0].contentRect;
+      if (width > 0 && height > 0) {
+        setContainerSize({ width, height });
+      }
+    });
+
+    observer.observe(container);
+    return () => observer.disconnect();
+  }, []);
+
+  // Compute the scaling factor from the designed canvas size to actual preview container size
+  const scaleFactor = useMemo(() => {
+    // If the base video layer has explicit resolution, prioritize that over settings
+    const v1Clip = layers.find(l => l.trackId === 'V1' && l.type === 'video');
+    const targetW = v1Clip?.width || canvasWidth;
+    return containerSize.width / targetW;
+  }, [layers, canvasWidth, containerSize.width]);
 
   // Find the base video layer (V1) for audio/playback control
   const foundBaseLayer = layers.find(l => l.trackId === 'V1' && l.type === 'video');
@@ -358,14 +394,14 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(({
     if (!draggingLayer || !dragStart) return;
 
     const handleMouseMove = (e: MouseEvent) => {
-      const deltaX = e.clientX - dragStart.x;
-      const deltaY = e.clientY - dragStart.y;
+      const deltaX = (e.clientX - dragStart.x) / scaleFactor;
+      const deltaY = (e.clientY - dragStart.y) / scaleFactor;
 
       let newX = dragStart.layerX + deltaX;
       let newY = dragStart.layerY + deltaY;
 
       // Snap vertical guide: x=0 means horizontally centered
-      const snapV = Math.abs(newX) < SNAP_THRESHOLD;
+      const snapV = Math.abs(newX * scaleFactor) < SNAP_THRESHOLD;
       if (snapV) newX = 0;
 
       // Snap horizontal guide: measure actual element center vs container center
@@ -383,7 +419,7 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(({
 
           if (Math.abs(distFromCenter) < SNAP_THRESHOLD) {
             // Snap: adjust newY so element center lands exactly on container center
-            newY = newY - distFromCenter;
+            newY = newY - (distFromCenter / scaleFactor);
             snapH = true;
           }
         }
@@ -406,7 +442,7 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(({
       window.removeEventListener('mousemove', handleMouseMove);
       window.removeEventListener('mouseup', handleMouseUp);
     };
-  }, [draggingLayer, dragStart, onLayerMove]);
+  }, [draggingLayer, dragStart, onLayerMove, scaleFactor]);
 
   // Aspect ratio styles
   // Use object-contain to show full video without cropping
@@ -470,7 +506,7 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(({
           ref={videoRef}
           src={foundBaseLayer.url}
           className={`absolute inset-0 w-full h-full ${videoFitClass}`}
-          style={getTransformStyles(foundBaseLayer.transform, 1)}
+          style={getTransformStyles(foundBaseLayer.transform, 1, false, scaleFactor)}
           playsInline
           preload="auto"
           onLoadedData={handleLoaded}
@@ -482,7 +518,7 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(({
         const isOverlay = layer.trackId !== 'V1';
         const isDragging = draggingLayer === layer.id;
         const isSelected = selectedLayerId === layer.id;
-        const styles = getTransformStyles(layer.transform, index + 2, isDragging);
+        const styles = getTransformStyles(layer.transform, index + 2, isDragging, scaleFactor);
 
         if (layer.type === 'video') {
           return (
@@ -521,8 +557,8 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(({
           // For overlay images (V2, V3), use explicit sizing instead of fill-then-scale
           if (isOverlay) {
             const scale = layer.transform?.scale || 0.2;
-            const xOffset = layer.transform?.x || 0;
-            const yOffset = layer.transform?.y || 0;
+            const xOffset = (layer.transform?.x || 0) * scaleFactor;
+            const yOffset = (layer.transform?.y || 0) * scaleFactor;
             const baseZIndex = (styles.zIndex as number) || 0;
 
             return (
@@ -580,8 +616,8 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(({
         if (layer.type === 'caption' && layer.captionWords && layer.captionStyle) {
           const isCaptionSelected = selectedLayerId === layer.id;
           const isEditing = editingCaptionId === layer.id;
-          const captionX = layer.transform?.x || 0;
-          const captionY = layer.transform?.y || 0;
+          const captionX = (layer.transform?.x || 0) * scaleFactor;
+          const captionY = (layer.transform?.y || 0) * scaleFactor;
           const boxWidth = layer.captionStyle.boxWidth || 90;
 
           return (
@@ -632,7 +668,7 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(({
                   className="bg-black/70 text-white border-2 border-teal-500 rounded-lg p-3 w-full resize-none outline-none text-center"
                   style={{
                     fontFamily: layer.captionStyle.fontFamily,
-                    fontSize: `${layer.captionStyle.fontSize}px`,
+                    fontSize: `${layer.captionStyle.fontSize * scaleFactor}px`,
                     fontWeight: layer.captionStyle.fontWeight === 'black' ? 900 : layer.captionStyle.fontWeight === 'bold' ? 700 : 400,
                     color: layer.captionStyle.color,
                     lineHeight: 1.4,
@@ -646,6 +682,7 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(({
                   words={layer.captionWords}
                   style={layer.captionStyle}
                   currentTime={layer.clipTime}
+                  scaleFactor={scaleFactor}
                   inline
                 />
               )}

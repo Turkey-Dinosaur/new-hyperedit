@@ -384,10 +384,35 @@ function cleanupSession(sessionId) {
 
 // Projects are persistent — no auto-cleanup. Users delete explicitly via the UI.
 
+// Returns a RELATIVE path to the bundled font, relative to process.cwd() (project root).
+// FFmpeg 8.x on Windows cannot parse Windows drive-letter paths (C:\...) in filter
+// options — it stops at the colon regardless of escaping. Relative paths bypass this.
+function getFontFilePath(fontFamily, fontWeight) {
+  const bold = fontWeight === 'bold' || fontWeight === '700' || fontWeight === 700;
+  const map = {
+    'Inter':      bold ? 'fonts/Roboto/static/Roboto-Bold.ttf'        : 'fonts/Roboto/static/Roboto-Regular.ttf',
+    'Roboto':     bold ? 'fonts/Roboto/static/Roboto-Bold.ttf'        : 'fonts/Roboto/static/Roboto-Regular.ttf',
+    'Poppins':    bold ? 'fonts/Poppins/Poppins-Bold.ttf'             : 'fonts/Poppins/Poppins-Regular.ttf',
+    'Montserrat': bold ? 'fonts/Montserrat/static/Montserrat-Bold.ttf': 'fonts/Montserrat/static/Montserrat-Regular.ttf',
+    'Oswald':     bold ? 'fonts/Oswald/static/Oswald-Bold.ttf'        : 'fonts/Oswald/static/Oswald-Regular.ttf',
+    'Bebas Neue': 'fonts/Oswald/static/Oswald-Regular.ttf',
+    'Arial':      bold ? 'fonts/Roboto/static/Roboto-Bold.ttf'        : 'fonts/Roboto/static/Roboto-Regular.ttf',
+    'Helvetica':  bold ? 'fonts/Roboto/static/Roboto-Bold.ttf'        : 'fonts/Roboto/static/Roboto-Regular.ttf',
+  };
+  const fallback = bold ? 'fonts/Roboto/static/Roboto-Bold.ttf' : 'fonts/Roboto/static/Roboto-Regular.ttf';
+  return map[fontFamily] || fallback;
+}
+
+// Directory for temp caption text files used during rendering
+const CAPTION_TEMP_DIR = join(process.cwd(), 'tmp');
+if (!existsSync(CAPTION_TEMP_DIR)) {
+  mkdirSync(CAPTION_TEMP_DIR, { recursive: true });
+}
+
 // Run FFmpeg command and return a promise
 function runFFmpeg(args, jobId, onProgress) {
   return new Promise((resolve, reject) => {
-    const ffmpeg = spawn('ffmpeg', args);
+    const ffmpeg = spawn('ffmpeg', args, { cwd: process.cwd() });
     let stderr = '';
 
     ffmpeg.stderr.on('data', (data) => {
@@ -414,7 +439,7 @@ function runFFmpeg(args, jobId, onProgress) {
         resolve(stderr);
       } else {
         if (jobId) console.error(`[${jobId}] FFmpeg failed (code ${code}). Full stderr:\n${stderr}`);
-        reject(new Error(`FFmpeg failed with code ${code}: ${stderr.slice(-2000)}`));
+        reject(new Error(`FFmpeg failed with code ${code}: ${stderr.slice(-8000)}`));
       }
     });
     ffmpeg.on('error', reject);
@@ -698,11 +723,13 @@ async function handleRemoveDeadAir(req, res) {
     filterParts.push(`${videoStreams.join('')}concat=n=${keepSegments.length}:v=1:a=0[outv]`);
     filterParts.push(`${audioStreams.join('')}concat=n=${keepSegments.length}:v=0:a=1[outa]`);
 
-    const filterComplex = filterParts.join(';');
+    const filterComplex = filterParts.join(';\n');
+    const filterComplexScriptPath = join(CAPTION_TEMP_DIR, `fc_deadair_${jobId}.txt`);
+    writeFileSync(filterComplexScriptPath, filterComplex, 'utf-8');
 
     const args = [
       '-y', '-i', inputPath,
-      '-filter_complex', filterComplex,
+      '-/filter_complex', filterComplexScriptPath,
       '-map', '[outv]', '-map', '[outa]',
       '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '18',
       '-c:a', 'aac', '-b:a', '192k',
@@ -710,7 +737,11 @@ async function handleRemoveDeadAir(req, res) {
       outputPath
     ];
 
-    await runFFmpeg(args, jobId);
+    try {
+      await runFFmpeg(args, jobId);
+    } finally {
+      try { unlinkSync(filterComplexScriptPath); } catch {}
+    }
     console.log(`\n[${jobId}] Dead air removal complete`);
 
     // Read output file and send it back
@@ -2355,6 +2386,8 @@ async function handleProjectRender(req, res, sessionId) {
 
     // Run render in background
     (async () => {
+      const captionTextFiles = [];
+      let filterComplexScriptPath = null;
       try {
         console.log(`\n[${jobId}] === RENDER ${isPreview ? 'PREVIEW' : 'EXPORT'} ===`);
         console.log(`[${jobId}] ${clips.length} clips, ${settings.width}x${settings.height}`);
@@ -2439,45 +2472,198 @@ async function handleProjectRender(req, res, sessionId) {
           lastVideo = `out${idx}`;
         }
 
-        // Burn captions (T1 clips) using drawtext
-        for (const clip of captionClips) {
-          const caption = captionData[clip.id];
-          if (!caption || !caption.words || caption.words.length === 0) continue;
+        // Burn captions using ASS subtitles if there are any captions
+        if (captionClips.length > 0) {
+          const assLines = [];
+          assLines.push('[Script Info]');
+          assLines.push(`PlayResX: ${settings.width}`);
+          assLines.push(`PlayResY: ${settings.height}`);
+          assLines.push('ScriptType: v4.00+');
+          assLines.push('');
+          assLines.push('[V4+ Styles]');
+          assLines.push('Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding');
 
-          const style = caption.style || {};
-          const text = caption.words.map(w => w.text).join(' ');
-          // Escape special chars for FFmpeg drawtext
-          const escapedText = text.replace(/'/g, "\u2019").replace(/:/g, "\\:").replace(/\\/g, "\\\\").replace(/%/g, "%%");
+          const events = [];
 
-          const fontSize = style.fontSize || 48;
-          const fontColor = style.color || 'white';
-          const fontFamily = style.fontFamily || 'Arial';
-          const strokeColor = style.strokeColor || 'black';
-          const strokeWidth = style.strokeWidth || 2;
-
-          // Position: bottom 8%, center, or top 8%
-          let yExpr;
-          if (style.position === 'top') {
-            yExpr = `h*0.08`;
-          } else if (style.position === 'center') {
-            yExpr = `(h-text_h)/2`;
-          } else {
-            yExpr = `h*0.92-text_h`;
+          // Helper to convert CSS hex colors to ASS ABGR format
+          function cssColorToAss(cssColor) {
+            if (!cssColor) return '&H00FFFFFF';
+            let hex = cssColor.replace('#', '');
+            if (hex.length === 3) {
+              hex = hex[0] + hex[0] + hex[1] + hex[1] + hex[2] + hex[2];
+            }
+            if (hex.length === 6) {
+              const r = hex.substring(0, 2);
+              const g = hex.substring(2, 4);
+              const b = hex.substring(4, 6);
+              return `&H00${b}${g}${r}`; // &H00BBGGRR format (no trailing & in Styles definition)
+            }
+            if (hex.length === 8) {
+              const r = hex.substring(0, 2);
+              const g = hex.substring(2, 4);
+              const b = hex.substring(4, 6);
+              const a = hex.substring(6, 8);
+              const assAlpha = (255 - parseInt(a, 16)).toString(16).padStart(2, '0');
+              return `&H${assAlpha}${b}${g}${r}`;
+            }
+            return '&H00FFFFFF';
           }
 
-          // Apply transform offsets
-          const offsetX = clip.transform?.x || 0;
-          const offsetY = clip.transform?.y || 0;
-          const xExpr = `(w-text_w)/2+${offsetX}`;
-          const yFinal = `${yExpr}+${offsetY}`;
+          function formatSecondsToAssTime(secs) {
+            if (secs < 0) secs = 0;
+            const h = Math.floor(secs / 3600);
+            const m = Math.floor((secs % 3600) / 60);
+            const s = Math.floor(secs % 60);
+            const cs = Math.floor((secs % 1) * 100);
+            return `${h}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}.${String(cs).padStart(2, '0')}`;
+          }
 
-          const enable = `between(t,${clip.start},${clip.start + clip.duration})`;
-          const labelIn = lastVideo;
-          const labelOut = `cap${clip.id.substring(0, 6)}`;
+          for (let clipIdx = 0; clipIdx < captionClips.length; clipIdx++) {
+            const clip = captionClips[clipIdx];
+            const caption = captionData[clip.id];
+            if (!caption || !caption.words || caption.words.length === 0) continue;
 
-          filterParts.push(
-            `[${labelIn}]drawtext=text='${escapedText}':fontsize=${fontSize}:fontcolor=${fontColor}:font='${fontFamily}':borderw=${strokeWidth}:bordercolor=${strokeColor}:x=${xExpr}:y=${yFinal}:enable='${enable}'[${labelOut}]`
-          );
+            const style = caption.style || {};
+            const words = caption.words;
+            const fontSize = style.fontSize || 48;
+            const fontFamily = style.fontFamily || 'Arial';
+            const bold = style.fontWeight === 'bold' || style.fontWeight === '700' || Number(style.fontWeight) >= 700;
+            const borderStyle = style.backgroundColor ? 3 : 1;
+            
+            const primaryAssColor = cssColorToAss(style.color || 'white');
+            const outlineAssColor = cssColorToAss(style.strokeColor || 'black');
+            const backAssColor = cssColorToAss(style.backgroundColor || 'black');
+            const outlineWidth = style.strokeWidth || 2;
+            const highlightAssColor = cssColorToAss(style.highlightColor || '#FFD700');
+
+            let alignment = 2; // bottom center
+            if (style.position === 'top') alignment = 8;
+            else if (style.position === 'center') alignment = 5;
+
+            let marginV = Math.round(settings.height * 0.08);
+
+            // Register style for this clip
+            assLines.push(`Style: Style_${clip.id},${fontFamily},${fontSize},${primaryAssColor},${primaryAssColor},${outlineAssColor},${backAssColor},${bold ? 1 : 0},0,0,0,100,100,0,0,${borderStyle},${outlineWidth},0,${alignment},10,10,${marginV},1`);
+
+            // Compute lines based on maxWidth and font metric approximations
+            const charW = Math.round(fontSize * (bold ? 0.58 : 0.55));
+            const spaceW = charW;
+            const maxWidth = settings.width * (style.boxWidth ? style.boxWidth / 100 : 0.9);
+
+            const lines = [];
+            let currentLine = [];
+            let currentLineWidth = 0;
+
+            for (let wi = 0; wi < words.length; wi++) {
+              const word = words[wi];
+              const wordW = word.text.length * charW;
+              const spaceAddition = currentLine.length > 0 ? spaceW : 0;
+              
+              if (currentLine.length > 0 && currentLineWidth + spaceAddition + wordW > maxWidth) {
+                lines.push(currentLine);
+                currentLine = [word];
+                currentLineWidth = wordW;
+              } else {
+                currentLine.push(word);
+                currentLineWidth += spaceAddition + wordW;
+              }
+            }
+            if (currentLine.length > 0) {
+              lines.push(currentLine);
+            }
+
+            function getDialogueText(activeWordIdx) {
+              let globalIdx = 0;
+              const lineTexts = [];
+              for (const line of lines) {
+                const wordsInLine = [];
+                for (const word of line) {
+                  const safeText = word.text.replace(/\\/g, '\\\\').replace(/\{/g, '\\{').replace(/\}/g, '\\}');
+                  if (globalIdx === activeWordIdx) {
+                    wordsInLine.push(`{\\c${highlightAssColor}}${safeText}{\\c}`);
+                  } else {
+                    wordsInLine.push(safeText);
+                  }
+                  globalIdx++;
+                }
+                lineTexts.push(wordsInLine.join(' '));
+              }
+              return lineTexts.join('\\N');
+            }
+
+            // Target coordinates including drag offsets
+            const offsetX = clip.transform?.x || 0;
+            const offsetY = clip.transform?.y || 0;
+            
+            const x = settings.width / 2 + offsetX;
+            let y;
+            if (style.position === 'top') {
+              y = settings.height * 0.08 + offsetY;
+            } else if (style.position === 'center') {
+              y = settings.height / 2 + offsetY;
+            } else {
+              y = settings.height * 0.92 + offsetY;
+            }
+
+            const isKaraoke = style.animation === 'karaoke';
+            
+            if (isKaraoke && words.length > 1) {
+              let lastTime = 0;
+              for (let wi = 0; wi < words.length; wi++) {
+                const word = words[wi];
+                if (word.start > lastTime) {
+                  events.push({
+                    start: clip.start + lastTime,
+                    end: clip.start + word.start,
+                    styleName: `Style_${clip.id}`,
+                    text: `{\\pos(${x},${y})}${getDialogueText(-1)}`
+                  });
+                }
+                events.push({
+                  start: clip.start + word.start,
+                  end: clip.start + word.end,
+                  styleName: `Style_${clip.id}`,
+                  text: `{\\pos(${x},${y})}${getDialogueText(wi)}`
+                });
+                lastTime = word.end;
+              }
+              if (clip.duration > lastTime) {
+                events.push({
+                  start: clip.start + lastTime,
+                  end: clip.start + clip.duration,
+                  styleName: `Style_${clip.id}`,
+                  text: `{\\pos(${x},${y})}${getDialogueText(-1)}`
+                });
+              }
+            } else {
+              events.push({
+                start: clip.start,
+                end: clip.start + clip.duration,
+                styleName: `Style_${clip.id}`,
+                text: `{\\pos(${x},${y})}${getDialogueText(-1)}`
+              });
+            }
+          }
+
+          // Sort events chronologically to be valid ASS format
+          events.sort((a, b) => a.start - b.start);
+
+          assLines.push('');
+          assLines.push('[Events]');
+          assLines.push('Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text');
+          for (const ev of events) {
+            const startStr = formatSecondsToAssTime(ev.start);
+            const endStr = formatSecondsToAssTime(ev.end);
+            assLines.push(`Dialogue: 0,${startStr},${endStr},${ev.styleName},,0,0,0,,${ev.text}`);
+          }
+
+          const assFileAbs = join(CAPTION_TEMP_DIR, `subtitles_${jobId}.ass`);
+          writeFileSync(assFileAbs, assLines.join('\n'), 'utf-8');
+          captionTextFiles.push(assFileAbs); // Automatic cleanup
+
+          const relativeAssPath = `tmp/subtitles_${jobId}.ass`;
+          const labelOut = `subtitles_out`;
+          filterParts.push(`[${lastVideo}]subtitles=${relativeAssPath}:fontsdir=fonts[${labelOut}]`);
           lastVideo = labelOut;
         }
 
@@ -2538,7 +2724,7 @@ async function handleProjectRender(req, res, sessionId) {
         // Mix all audio sources
         let audioFilter = '';
         if (allAudioLabels.length === 1) {
-          filterParts.push(`${allAudioLabels[0]}acopy[aout]`);
+          filterParts.push(`${allAudioLabels[0]}anull[aout]`);
           audioFilter = '-map [aout]';
         } else if (allAudioLabels.length > 1) {
           filterParts.push(`${allAudioLabels.join('')}amix=inputs=${allAudioLabels.length}:duration=longest[aout]`);
@@ -2551,10 +2737,13 @@ async function handleProjectRender(req, res, sessionId) {
         const renderFilename = `${pad(now.getDate())}${pad(now.getMonth() + 1)}${now.getFullYear()}-${pad(now.getHours())}${pad(now.getMinutes())}-Rendered.mp4`;
         const outputPath = join(session.rendersDir, isPreview ? 'preview.mp4' : renderFilename);
 
+        filterComplexScriptPath = join(CAPTION_TEMP_DIR, `fc_render_${jobId}.txt`);
+        writeFileSync(filterComplexScriptPath, filterParts.join(';\n'), 'utf-8');
+
         const ffmpegArgs = [
           '-y',
           ...inputs,
-          '-filter_complex', filterParts.join(';'),
+          '-/filter_complex', filterComplexScriptPath,
           '-map', '[vout]',
         ];
 
@@ -2679,6 +2868,13 @@ async function handleProjectRender(req, res, sessionId) {
         job.progress = 0;
         job.statusMessage = error.message;
         job.error = error.message;
+      } finally {
+        for (const f of captionTextFiles) {
+          try { unlinkSync(f); } catch {}
+        }
+        if (filterComplexScriptPath) {
+          try { unlinkSync(filterComplexScriptPath); } catch {}
+        }
       }
     })();
 
@@ -9108,6 +9304,7 @@ async function handleMergeAll(req, res, sessionId) {
 
     // Start background process
     (async () => {
+      let filterComplexScriptPath = null;
       try {
         const canCopy = await checkFastConcatCompatibility(session, clips);
         console.log(`\n[${jobId}] === BACKGROUND MERGE ===`);
@@ -9188,7 +9385,9 @@ async function handleMergeAll(req, res, sessionId) {
           }
           filterParts.push(`${videoStreams.join('')}concat=n=${validClipsCount}:v=1:a=0[outv]`);
           filterParts.push(`${audioStreams.join('')}concat=n=${validClipsCount}:v=0:a=1[outa]`);
-          args.push('-filter_complex', filterParts.join(';'), '-map', '[outv]', '-map', '[outa]',
+          filterComplexScriptPath = join(CAPTION_TEMP_DIR, `fc_merge_${jobId}.txt`);
+          writeFileSync(filterComplexScriptPath, filterParts.join(';\n'), 'utf-8');
+          args.push('-/filter_complex', filterComplexScriptPath, '-map', '[outv]', '-map', '[outa]',
             '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '18', '-c:a', 'aac', '-b:a', '192k',
             '-progress', 'pipe:1', '-movflags', '+faststart', outputPath);
         }
@@ -9262,6 +9461,10 @@ async function handleMergeAll(req, res, sessionId) {
       } catch (err) {
         console.error(`[${jobId}] Background merge failed:`, err);
         job.status = 'failed'; job.error = err.message;
+      } finally {
+        if (filterComplexScriptPath) {
+          try { unlinkSync(filterComplexScriptPath); } catch {}
+        }
       }
     })();
   } catch (error) {

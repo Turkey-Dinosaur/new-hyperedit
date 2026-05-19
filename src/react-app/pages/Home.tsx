@@ -91,7 +91,6 @@ export default function Home() {
     resizeClip,
     saveProject,
     loadProject,
-    renderProject,
     getDuration,
     // Captions
     addCaptionClip,
@@ -108,6 +107,7 @@ export default function Home() {
     updateTabClips,
     updateTabAsset,
     // Settings
+    settings,
     setSettings,
     setClips,
     // Undo / Redo
@@ -795,24 +795,33 @@ export default function Home() {
     const clip = clips.find(c => c.id === layerId);
     if (!clip) return;
 
-    const snapshot = layerDragInitial.current;
-    if (snapshot && selectedClipIds.includes(layerId) && selectedClipIds.length > 1) {
-      const primary = snapshot.get(layerId);
-      if (primary) {
-        const dx = x - primary.x;
-        const dy = y - primary.y;
-        for (const selId of selectedClipIds) {
-          const initial = snapshot.get(selId);
-          const selClip = clips.find(c => c.id === selId);
-          if (!initial || !selClip) continue;
-          updateClip(selId, {
-            transform: { ...selClip.transform, x: initial.x + dx, y: initial.y + dy },
-          });
-        }
+    if (clip.trackId === 'T1') {
+      // If dragging a caption clip, apply the transform to ALL caption clips in the project
+      const captionClips = clips.filter(c => c.trackId === 'T1');
+      for (const capClip of captionClips) {
+        const currentTransform = capClip.transform || {};
+        updateClip(capClip.id, { transform: { ...currentTransform, x, y } });
       }
     } else {
-      const currentTransform = clip.transform || {};
-      updateClip(layerId, { transform: { ...currentTransform, x, y } });
+      const snapshot = layerDragInitial.current;
+      if (snapshot && selectedClipIds.includes(layerId) && selectedClipIds.length > 1) {
+        const primary = snapshot.get(layerId);
+        if (primary) {
+          const dx = x - primary.x;
+          const dy = y - primary.y;
+          for (const selId of selectedClipIds) {
+            const initial = snapshot.get(selId);
+            const selClip = clips.find(c => c.id === selId);
+            if (!initial || !selClip) continue;
+            updateClip(selId, {
+              transform: { ...selClip.transform, x: initial.x + dx, y: initial.y + dy },
+            });
+          }
+        }
+      } else {
+        const currentTransform = clip.transform || {};
+        updateClip(layerId, { transform: { ...currentTransform, x, y } });
+      }
     }
   }, [clips, selectedClipIds, updateClip]);
 
@@ -3126,6 +3135,8 @@ export default function Home() {
                 isPlaying={isPlaying && !previewAssetId}
                 aspectRatio={aspectRatio}
                 volume={masterVolume}
+                canvasWidth={settings.width || 1920}
+                canvasHeight={settings.height || 1080}
                 onLayerMove={handleLayerMove}
                 onLayerDragStart={handleLayerDragStart}
                 onLayerSelect={handleLayerSelect}
